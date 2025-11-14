@@ -1,0 +1,128 @@
+import { MigrationInterface, QueryRunner } from "typeorm";
+
+export class InitialSchema1763107798553 implements MigrationInterface {
+    name = 'InitialSchema1763107798553'
+
+    public async up(queryRunner: QueryRunner): Promise<void> {
+        await queryRunner.query(`CREATE TABLE "creator_shares" ("id" uuid NOT NULL DEFAULT uuid_generate_v4(), "creatorId" uuid NOT NULL, "holderAddress" character varying NOT NULL, "sharesHeld" integer NOT NULL, "averageBuyPrice" numeric(18,6), "totalInvested" numeric(18,6) NOT NULL DEFAULT '0', "createdAt" TIMESTAMP NOT NULL DEFAULT now(), "updatedAt" TIMESTAMP NOT NULL DEFAULT now(), CONSTRAINT "UQ_4c602b7696ad8ae16c83de3ccf0" UNIQUE ("creatorId", "holderAddress"), CONSTRAINT "PK_12b93ae54724e6de2cb7d8c1b4f" PRIMARY KEY ("id"))`);
+        await queryRunner.query(`CREATE INDEX "IDX_aaf05ab51e7224947063f54f38" ON "creator_shares" ("holderAddress") `);
+        await queryRunner.query(`CREATE INDEX "IDX_7ff28fb6c3f1086bc482830984" ON "creator_shares" ("creatorId") `);
+        await queryRunner.query(`CREATE TYPE "public"."share_transactions_transactiontype_enum" AS ENUM('BUY', 'SELL')`);
+        await queryRunner.query(`CREATE TABLE "share_transactions" ("id" uuid NOT NULL DEFAULT uuid_generate_v4(), "creatorId" uuid NOT NULL, "transactionType" "public"."share_transactions_transactiontype_enum" NOT NULL, "buyerAddress" character varying, "sellerAddress" character varying, "shares" integer NOT NULL, "pricePerShare" numeric(18,6), "totalAmount" numeric(18,6) NOT NULL, "fees" numeric(18,6) NOT NULL DEFAULT '0', "txHash" character varying, "blockNumber" integer, "timestamp" TIMESTAMP NOT NULL, CONSTRAINT "UQ_f7caf3a7b6c30554fdb0d527ed7" UNIQUE ("txHash"), CONSTRAINT "PK_bdf4a4405c4cb7a473be31612ac" PRIMARY KEY ("id"))`);
+        await queryRunner.query(`CREATE INDEX "IDX_fdb9d83d530ec6bcb3eb706c07" ON "share_transactions" ("timestamp") `);
+        await queryRunner.query(`CREATE INDEX "IDX_f7caf3a7b6c30554fdb0d527ed" ON "share_transactions" ("txHash") `);
+        await queryRunner.query(`CREATE INDEX "IDX_d51559e8546994bb0decd114a5" ON "share_transactions" ("sellerAddress") `);
+        await queryRunner.query(`CREATE INDEX "IDX_d5f40bdb305bed4833091d7f23" ON "share_transactions" ("buyerAddress") `);
+        await queryRunner.query(`CREATE INDEX "IDX_9daef2732b82f8f99fc7e6e96d" ON "share_transactions" ("creatorId") `);
+        await queryRunner.query(`CREATE TABLE "market_positions" ("id" uuid NOT NULL DEFAULT uuid_generate_v4(), "marketId" uuid NOT NULL, "userAddress" character varying NOT NULL, "outcome" integer NOT NULL, "shares" numeric(18,6) NOT NULL, "costBasis" numeric(18,6) NOT NULL DEFAULT '0', "claimed" boolean NOT NULL DEFAULT false, "claimedAt" TIMESTAMP, "createdAt" TIMESTAMP NOT NULL DEFAULT now(), "updatedAt" TIMESTAMP NOT NULL DEFAULT now(), CONSTRAINT "UQ_8d462631f6ade56e47c7bfd6137" UNIQUE ("marketId", "userAddress", "outcome"), CONSTRAINT "PK_36d4f8ec6acf50f196d9f621105" PRIMARY KEY ("id"))`);
+        await queryRunner.query(`CREATE INDEX "IDX_fa2638fa43a622a889c57172ee" ON "market_positions" ("userAddress") `);
+        await queryRunner.query(`CREATE INDEX "IDX_4758823b62ff915e8d7a2d5442" ON "market_positions" ("marketId") `);
+        await queryRunner.query(`CREATE TYPE "public"."market_trades_tradetype_enum" AS ENUM('BUY', 'SELL')`);
+        await queryRunner.query(`CREATE TABLE "market_trades" ("id" uuid NOT NULL DEFAULT uuid_generate_v4(), "marketId" uuid NOT NULL, "userAddress" character varying NOT NULL, "outcome" integer NOT NULL, "tradeType" "public"."market_trades_tradetype_enum" NOT NULL, "amount" numeric(18,6) NOT NULL, "shares" numeric(18,6) NOT NULL, "price" numeric(18,6), "fees" numeric(18,6) NOT NULL DEFAULT '0', "txHash" character varying, "timestamp" TIMESTAMP NOT NULL, CONSTRAINT "UQ_c663147085d30fc50344b9e244d" UNIQUE ("txHash"), CONSTRAINT "PK_0b76d817db695036c9df44fb824" PRIMARY KEY ("id"))`);
+        await queryRunner.query(`CREATE INDEX "IDX_b9cd3ba3801ea27890c34e101a" ON "market_trades" ("timestamp") `);
+        await queryRunner.query(`CREATE INDEX "IDX_c663147085d30fc50344b9e244" ON "market_trades" ("txHash") `);
+        await queryRunner.query(`CREATE INDEX "IDX_5448ff1073ddcc4c929d70a7fa" ON "market_trades" ("userAddress") `);
+        await queryRunner.query(`CREATE INDEX "IDX_f6a6287de17bb811cff297c9c3" ON "market_trades" ("marketId") `);
+        await queryRunner.query(`CREATE TABLE "creator_volume_tracking" ("id" uuid NOT NULL DEFAULT uuid_generate_v4(), "creatorId" uuid NOT NULL, "marketId" uuid NOT NULL, "marketVolume" numeric(18,6) NOT NULL, "trackedAt" TIMESTAMP NOT NULL, CONSTRAINT "UQ_8446d4de972ad8d6cc3bbba76af" UNIQUE ("creatorId", "marketId"), CONSTRAINT "PK_7bf382cf258f1a9e0e73739528d" PRIMARY KEY ("id"))`);
+        await queryRunner.query(`CREATE INDEX "IDX_bf646e128ee4665315c190c724" ON "creator_volume_tracking" ("marketId") `);
+        await queryRunner.query(`CREATE INDEX "IDX_6941ce0b7668d14094c414f15a" ON "creator_volume_tracking" ("creatorId") `);
+        await queryRunner.query(`CREATE TYPE "public"."opinion_markets_category_enum" AS ENUM('sports', 'politics', 'entertainment', 'technology', 'crypto', 'finance', 'gaming', 'culture', 'other')`);
+        await queryRunner.query(`CREATE TYPE "public"."opinion_markets_status_enum" AS ENUM('active', 'resolved', 'disputed', 'cancelled')`);
+        await queryRunner.query(`CREATE TABLE "opinion_markets" ("id" uuid NOT NULL DEFAULT uuid_generate_v4(), "creatorId" uuid NOT NULL, "title" character varying NOT NULL, "description" text, "category" "public"."opinion_markets_category_enum", "outcomes" jsonb NOT NULL, "duration" integer NOT NULL, "endTime" TIMESTAMP NOT NULL, "status" "public"."opinion_markets_status_enum" NOT NULL DEFAULT 'active', "volume" numeric(18,6) NOT NULL DEFAULT '0', "totalTrades" integer NOT NULL DEFAULT '0', "resolutionTime" TIMESTAMP, "winningOutcome" integer, "resolutionNote" text, "resolvedBy" uuid, "contractAddress" character varying, "createdAt" TIMESTAMP NOT NULL DEFAULT now(), "updatedAt" TIMESTAMP NOT NULL DEFAULT now(), CONSTRAINT "PK_c31a9a4674a94a266f9fa17221f" PRIMARY KEY ("id"))`);
+        await queryRunner.query(`CREATE INDEX "IDX_6bef737602c101a1b4bbb583e7" ON "opinion_markets" ("createdAt") `);
+        await queryRunner.query(`CREATE INDEX "IDX_7e336352c920cb7f045a90a699" ON "opinion_markets" ("volume") `);
+        await queryRunner.query(`CREATE INDEX "IDX_ae79f1d9fc3e0d8894cf3a7689" ON "opinion_markets" ("status") `);
+        await queryRunner.query(`CREATE INDEX "IDX_14df19e2e07723e381fbd89050" ON "opinion_markets" ("endTime") `);
+        await queryRunner.query(`CREATE INDEX "IDX_94cbfbdbf5387cc314452a4493" ON "opinion_markets" ("creatorId") `);
+        await queryRunner.query(`CREATE TABLE "dividend_epochs" ("id" uuid NOT NULL DEFAULT uuid_generate_v4(), "creatorId" uuid NOT NULL, "epochNumber" integer NOT NULL, "startTime" TIMESTAMP NOT NULL, "endTime" TIMESTAMP NOT NULL, "shareFeesCollected" numeric(18,6) NOT NULL DEFAULT '0', "marketFeesCollected" numeric(18,6) NOT NULL DEFAULT '0', "totalFees" numeric(18,6) NOT NULL DEFAULT '0', "distributed" boolean NOT NULL DEFAULT false, "distributedAt" TIMESTAMP, "createdAt" TIMESTAMP NOT NULL DEFAULT now(), CONSTRAINT "UQ_8bad0589d2ab302418920482b5d" UNIQUE ("creatorId", "epochNumber"), CONSTRAINT "PK_acebf4303189cee5864559fbe92" PRIMARY KEY ("id"))`);
+        await queryRunner.query(`CREATE INDEX "IDX_b8ea126e81e751b4e22f411b07" ON "dividend_epochs" ("creatorId") `);
+        await queryRunner.query(`CREATE TABLE "dividend_claims" ("id" uuid NOT NULL DEFAULT uuid_generate_v4(), "userAddress" character varying NOT NULL, "creatorId" uuid NOT NULL, "amount" numeric(18,6) NOT NULL, "tweetUrl" character varying NOT NULL, "tweetId" character varying, "verified" boolean NOT NULL DEFAULT false, "txHash" character varying, "claimedAt" TIMESTAMP NOT NULL, CONSTRAINT "UQ_8d80178e6d4516bbb908eff2eec" UNIQUE ("tweetId"), CONSTRAINT "UQ_94fad9734959e468aefffa09dd0" UNIQUE ("txHash"), CONSTRAINT "PK_46e6412a6a93d9f8b9a968bd1ff" PRIMARY KEY ("id"))`);
+        await queryRunner.query(`CREATE INDEX "IDX_0be1ce43742832ff16ae38082e" ON "dividend_claims" ("claimedAt") `);
+        await queryRunner.query(`CREATE INDEX "IDX_6fdfecad63e30a86d369a74c25" ON "dividend_claims" ("creatorId") `);
+        await queryRunner.query(`CREATE INDEX "IDX_dcde0515945e8ce5f23f4bf903" ON "dividend_claims" ("userAddress") `);
+        await queryRunner.query(`CREATE TYPE "public"."creators_status_enum" AS ENUM('pending', 'active', 'suspended')`);
+        await queryRunner.query(`CREATE TABLE "creators" ("id" uuid NOT NULL DEFAULT uuid_generate_v4(), "userId" uuid NOT NULL, "twitterId" character varying NOT NULL, "twitterHandle" character varying NOT NULL, "followerCount" integer NOT NULL DEFAULT '0', "engagementRate" numeric(10,2) NOT NULL DEFAULT '0', "postCount30d" integer NOT NULL DEFAULT '0', "qualifiedAt" TIMESTAMP, "stakePaid" boolean NOT NULL DEFAULT false, "stakeAmount" numeric(18,6), "stakeReturned" boolean NOT NULL DEFAULT false, "totalMarketVolume" numeric(18,6) NOT NULL DEFAULT '0', "sharesUnlocked" boolean NOT NULL DEFAULT false, "sharesUnlockedAt" TIMESTAMP, "shareContractAddress" character varying, "totalShares" integer NOT NULL DEFAULT '0', "status" "public"."creators_status_enum" NOT NULL DEFAULT 'pending', "createdAt" TIMESTAMP NOT NULL DEFAULT now(), "updatedAt" TIMESTAMP NOT NULL DEFAULT now(), CONSTRAINT "UQ_373a5e747c89f64b05ce0df77e2" UNIQUE ("twitterId"), CONSTRAINT "UQ_5fe774a843e20f0a409e2eb74c4" UNIQUE ("shareContractAddress"), CONSTRAINT "REL_13b0cb1e4fc9b39ddab3c67090" UNIQUE ("userId"), CONSTRAINT "PK_b27dd693f7df17bbfc21f00166a" PRIMARY KEY ("id"))`);
+        await queryRunner.query(`CREATE INDEX "IDX_1b9b5d4fcb4280b804b6137657" ON "creators" ("sharesUnlocked") `);
+        await queryRunner.query(`CREATE INDEX "IDX_564c9272a05ec631c1709c54b1" ON "creators" ("totalMarketVolume") `);
+        await queryRunner.query(`CREATE INDEX "IDX_644e158714f4caa234b22ef9da" ON "creators" ("twitterHandle") `);
+        await queryRunner.query(`CREATE TABLE "users" ("id" uuid NOT NULL DEFAULT uuid_generate_v4(), "twitterId" character varying NOT NULL, "twitterHandle" character varying NOT NULL, "displayName" character varying NOT NULL, "profilePictureUrl" character varying NOT NULL, "bio" text, "walletAddress" character varying, "followerCount" integer NOT NULL DEFAULT '0', "followingCount" integer NOT NULL DEFAULT '0', "email" character varying, "isAdmin" boolean NOT NULL DEFAULT false, "createdAt" TIMESTAMP NOT NULL DEFAULT now(), "updatedAt" TIMESTAMP NOT NULL DEFAULT now(), "lastLoginAt" TIMESTAMP, CONSTRAINT "UQ_eda3fd04bdb78a1c678fdb6ecc9" UNIQUE ("twitterId"), CONSTRAINT "UQ_fc71cd6fb73f95244b23e2ef113" UNIQUE ("walletAddress"), CONSTRAINT "PK_a3ffb1c0c8416b9fc6f907b7433" PRIMARY KEY ("id"))`);
+        await queryRunner.query(`CREATE INDEX "IDX_fc71cd6fb73f95244b23e2ef11" ON "users" ("walletAddress") `);
+        await queryRunner.query(`CREATE INDEX "IDX_664b4ed46820545c5c4ab36f5e" ON "users" ("twitterHandle") `);
+        await queryRunner.query(`CREATE INDEX "IDX_eda3fd04bdb78a1c678fdb6ecc" ON "users" ("twitterId") `);
+        await queryRunner.query(`CREATE TABLE "claimable_dividends" ("id" uuid NOT NULL DEFAULT uuid_generate_v4(), "userAddress" character varying NOT NULL, "creatorId" uuid NOT NULL, "amount" numeric(18,6) NOT NULL, "epochsIncluded" jsonb NOT NULL, "claimable" boolean NOT NULL DEFAULT true, "createdAt" TIMESTAMP NOT NULL DEFAULT now(), "updatedAt" TIMESTAMP NOT NULL DEFAULT now(), CONSTRAINT "PK_4fddf476c7a48cac5fc6c9b421f" PRIMARY KEY ("id"))`);
+        await queryRunner.query(`CREATE INDEX "IDX_d316b3c1a7f13dce246eb0bf05" ON "claimable_dividends" ("creatorId") `);
+        await queryRunner.query(`CREATE INDEX "IDX_d406eceb26513621b1748c474e" ON "claimable_dividends" ("userAddress") `);
+        await queryRunner.query(`ALTER TABLE "creator_shares" ADD CONSTRAINT "FK_7ff28fb6c3f1086bc4828309845" FOREIGN KEY ("creatorId") REFERENCES "creators"("id") ON DELETE NO ACTION ON UPDATE NO ACTION`);
+        await queryRunner.query(`ALTER TABLE "share_transactions" ADD CONSTRAINT "FK_9daef2732b82f8f99fc7e6e96dc" FOREIGN KEY ("creatorId") REFERENCES "creators"("id") ON DELETE NO ACTION ON UPDATE NO ACTION`);
+        await queryRunner.query(`ALTER TABLE "market_positions" ADD CONSTRAINT "FK_4758823b62ff915e8d7a2d54429" FOREIGN KEY ("marketId") REFERENCES "opinion_markets"("id") ON DELETE NO ACTION ON UPDATE NO ACTION`);
+        await queryRunner.query(`ALTER TABLE "market_trades" ADD CONSTRAINT "FK_f6a6287de17bb811cff297c9c3c" FOREIGN KEY ("marketId") REFERENCES "opinion_markets"("id") ON DELETE NO ACTION ON UPDATE NO ACTION`);
+        await queryRunner.query(`ALTER TABLE "creator_volume_tracking" ADD CONSTRAINT "FK_6941ce0b7668d14094c414f15ae" FOREIGN KEY ("creatorId") REFERENCES "creators"("id") ON DELETE NO ACTION ON UPDATE NO ACTION`);
+        await queryRunner.query(`ALTER TABLE "creator_volume_tracking" ADD CONSTRAINT "FK_bf646e128ee4665315c190c724d" FOREIGN KEY ("marketId") REFERENCES "opinion_markets"("id") ON DELETE NO ACTION ON UPDATE NO ACTION`);
+        await queryRunner.query(`ALTER TABLE "opinion_markets" ADD CONSTRAINT "FK_94cbfbdbf5387cc314452a4493e" FOREIGN KEY ("creatorId") REFERENCES "creators"("id") ON DELETE NO ACTION ON UPDATE NO ACTION`);
+        await queryRunner.query(`ALTER TABLE "dividend_epochs" ADD CONSTRAINT "FK_b8ea126e81e751b4e22f411b07a" FOREIGN KEY ("creatorId") REFERENCES "creators"("id") ON DELETE NO ACTION ON UPDATE NO ACTION`);
+        await queryRunner.query(`ALTER TABLE "dividend_claims" ADD CONSTRAINT "FK_6fdfecad63e30a86d369a74c25e" FOREIGN KEY ("creatorId") REFERENCES "creators"("id") ON DELETE NO ACTION ON UPDATE NO ACTION`);
+        await queryRunner.query(`ALTER TABLE "creators" ADD CONSTRAINT "FK_13b0cb1e4fc9b39ddab3c670907" FOREIGN KEY ("userId") REFERENCES "users"("id") ON DELETE NO ACTION ON UPDATE NO ACTION`);
+    }
+
+    public async down(queryRunner: QueryRunner): Promise<void> {
+        await queryRunner.query(`ALTER TABLE "creators" DROP CONSTRAINT "FK_13b0cb1e4fc9b39ddab3c670907"`);
+        await queryRunner.query(`ALTER TABLE "dividend_claims" DROP CONSTRAINT "FK_6fdfecad63e30a86d369a74c25e"`);
+        await queryRunner.query(`ALTER TABLE "dividend_epochs" DROP CONSTRAINT "FK_b8ea126e81e751b4e22f411b07a"`);
+        await queryRunner.query(`ALTER TABLE "opinion_markets" DROP CONSTRAINT "FK_94cbfbdbf5387cc314452a4493e"`);
+        await queryRunner.query(`ALTER TABLE "creator_volume_tracking" DROP CONSTRAINT "FK_bf646e128ee4665315c190c724d"`);
+        await queryRunner.query(`ALTER TABLE "creator_volume_tracking" DROP CONSTRAINT "FK_6941ce0b7668d14094c414f15ae"`);
+        await queryRunner.query(`ALTER TABLE "market_trades" DROP CONSTRAINT "FK_f6a6287de17bb811cff297c9c3c"`);
+        await queryRunner.query(`ALTER TABLE "market_positions" DROP CONSTRAINT "FK_4758823b62ff915e8d7a2d54429"`);
+        await queryRunner.query(`ALTER TABLE "share_transactions" DROP CONSTRAINT "FK_9daef2732b82f8f99fc7e6e96dc"`);
+        await queryRunner.query(`ALTER TABLE "creator_shares" DROP CONSTRAINT "FK_7ff28fb6c3f1086bc4828309845"`);
+        await queryRunner.query(`DROP INDEX "public"."IDX_d406eceb26513621b1748c474e"`);
+        await queryRunner.query(`DROP INDEX "public"."IDX_d316b3c1a7f13dce246eb0bf05"`);
+        await queryRunner.query(`DROP TABLE "claimable_dividends"`);
+        await queryRunner.query(`DROP INDEX "public"."IDX_eda3fd04bdb78a1c678fdb6ecc"`);
+        await queryRunner.query(`DROP INDEX "public"."IDX_664b4ed46820545c5c4ab36f5e"`);
+        await queryRunner.query(`DROP INDEX "public"."IDX_fc71cd6fb73f95244b23e2ef11"`);
+        await queryRunner.query(`DROP TABLE "users"`);
+        await queryRunner.query(`DROP INDEX "public"."IDX_644e158714f4caa234b22ef9da"`);
+        await queryRunner.query(`DROP INDEX "public"."IDX_564c9272a05ec631c1709c54b1"`);
+        await queryRunner.query(`DROP INDEX "public"."IDX_1b9b5d4fcb4280b804b6137657"`);
+        await queryRunner.query(`DROP TABLE "creators"`);
+        await queryRunner.query(`DROP TYPE "public"."creators_status_enum"`);
+        await queryRunner.query(`DROP INDEX "public"."IDX_dcde0515945e8ce5f23f4bf903"`);
+        await queryRunner.query(`DROP INDEX "public"."IDX_6fdfecad63e30a86d369a74c25"`);
+        await queryRunner.query(`DROP INDEX "public"."IDX_0be1ce43742832ff16ae38082e"`);
+        await queryRunner.query(`DROP TABLE "dividend_claims"`);
+        await queryRunner.query(`DROP INDEX "public"."IDX_b8ea126e81e751b4e22f411b07"`);
+        await queryRunner.query(`DROP TABLE "dividend_epochs"`);
+        await queryRunner.query(`DROP INDEX "public"."IDX_94cbfbdbf5387cc314452a4493"`);
+        await queryRunner.query(`DROP INDEX "public"."IDX_14df19e2e07723e381fbd89050"`);
+        await queryRunner.query(`DROP INDEX "public"."IDX_ae79f1d9fc3e0d8894cf3a7689"`);
+        await queryRunner.query(`DROP INDEX "public"."IDX_7e336352c920cb7f045a90a699"`);
+        await queryRunner.query(`DROP INDEX "public"."IDX_6bef737602c101a1b4bbb583e7"`);
+        await queryRunner.query(`DROP TABLE "opinion_markets"`);
+        await queryRunner.query(`DROP TYPE "public"."opinion_markets_status_enum"`);
+        await queryRunner.query(`DROP TYPE "public"."opinion_markets_category_enum"`);
+        await queryRunner.query(`DROP INDEX "public"."IDX_6941ce0b7668d14094c414f15a"`);
+        await queryRunner.query(`DROP INDEX "public"."IDX_bf646e128ee4665315c190c724"`);
+        await queryRunner.query(`DROP TABLE "creator_volume_tracking"`);
+        await queryRunner.query(`DROP INDEX "public"."IDX_f6a6287de17bb811cff297c9c3"`);
+        await queryRunner.query(`DROP INDEX "public"."IDX_5448ff1073ddcc4c929d70a7fa"`);
+        await queryRunner.query(`DROP INDEX "public"."IDX_c663147085d30fc50344b9e244"`);
+        await queryRunner.query(`DROP INDEX "public"."IDX_b9cd3ba3801ea27890c34e101a"`);
+        await queryRunner.query(`DROP TABLE "market_trades"`);
+        await queryRunner.query(`DROP TYPE "public"."market_trades_tradetype_enum"`);
+        await queryRunner.query(`DROP INDEX "public"."IDX_4758823b62ff915e8d7a2d5442"`);
+        await queryRunner.query(`DROP INDEX "public"."IDX_fa2638fa43a622a889c57172ee"`);
+        await queryRunner.query(`DROP TABLE "market_positions"`);
+        await queryRunner.query(`DROP INDEX "public"."IDX_9daef2732b82f8f99fc7e6e96d"`);
+        await queryRunner.query(`DROP INDEX "public"."IDX_d5f40bdb305bed4833091d7f23"`);
+        await queryRunner.query(`DROP INDEX "public"."IDX_d51559e8546994bb0decd114a5"`);
+        await queryRunner.query(`DROP INDEX "public"."IDX_f7caf3a7b6c30554fdb0d527ed"`);
+        await queryRunner.query(`DROP INDEX "public"."IDX_fdb9d83d530ec6bcb3eb706c07"`);
+        await queryRunner.query(`DROP TABLE "share_transactions"`);
+        await queryRunner.query(`DROP TYPE "public"."share_transactions_transactiontype_enum"`);
+        await queryRunner.query(`DROP INDEX "public"."IDX_7ff28fb6c3f1086bc482830984"`);
+        await queryRunner.query(`DROP INDEX "public"."IDX_aaf05ab51e7224947063f54f38"`);
+        await queryRunner.query(`DROP TABLE "creator_shares"`);
+    }
+
+}

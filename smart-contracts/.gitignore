@@ -1,0 +1,30 @@
+node_modules
+.env
+coverage
+coverage.json
+typechain-types
+
+# Hardhat files
+cache
+artifacts
+
+# TypeScript
+dist
+*.tsbuildinfo
+
+# IDE
+.idea
+.vscode
+
+# Logs
+*.log
+gas-report.txt
+
+# Deployment files (may contain sensitive data)
+deployments/
+exports/
+
+# Ensure .env is ignored
+.env
+.env.local
+.env.*.local

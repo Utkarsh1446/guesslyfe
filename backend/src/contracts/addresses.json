@@ -1,0 +1,9 @@
+{
+  "network": "baseSepolia",
+  "timestamp": "2025-11-14T09:23:00.221Z",
+  "usdc": "0x036CbD53842c5426634e7929541eC2318f3dCF7e",
+  "feeCollector": "0x86d036b59d23e0BF6e7A43d8e625c005Aa8bd7B4",
+  "creatorShareFactory": "0xe941e7fC3aaFecb944E70FCe236BD638ACCbDD53",
+  "opinionMarket": "0x60a308C4e4d653F5BA6c5EFf412C9cDc3FAEEc72",
+  "deployer": "0x9F4c1f7EAA0b729b798F81BE84B25fDf9F66A0bf"
+}
