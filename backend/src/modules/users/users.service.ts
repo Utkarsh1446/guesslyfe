@@ -53,9 +53,9 @@ export class UsersService {
       twitterId: user.twitterId,
       twitterHandle: user.twitterHandle,
       displayName: user.displayName,
-      bio: user.bio,
+      bio: user.bio || undefined,
       profilePictureUrl: user.profilePictureUrl,
-      walletAddress: user.walletAddress,
+      walletAddress: user.walletAddress || undefined,
       isCreator: !!user.creator,
       twitterFollowers: user.twitterFollowers,
       createdAt: user.createdAt,
@@ -136,9 +136,9 @@ export class UsersService {
       twitterId: user.twitterId,
       twitterHandle: user.twitterHandle,
       displayName: user.displayName,
-      bio: user.bio,
+      bio: user.bio || undefined,
       profilePictureUrl: user.profilePictureUrl,
-      walletAddress: user.walletAddress,
+      walletAddress: user.walletAddress || undefined,
       isCreator: !!user.creator,
       twitterFollowers: user.twitterFollowers,
       createdAt: user.createdAt,
@@ -218,11 +218,13 @@ export class UsersService {
     }>();
 
     for (const tx of transactions) {
-      const creatorAddress = tx.creatorShare.creatorAddress;
+      const creatorAddress = tx.creator.creatorAddress;
+      if (!creatorAddress) continue; // Skip if no creator address
+
       const existing = portfolioMap.get(creatorAddress) || {
         creatorAddress,
-        creatorHandle: tx.creatorShare.creator.user.twitterHandle,
-        creatorName: tx.creatorShare.creator.user.displayName,
+        creatorHandle: tx.creator.user.twitterHandle,
+        creatorName: tx.creator.user.displayName,
         totalShares: BigInt(0),
         totalInvested: BigInt(0),
         totalDividends: BigInt(0),
@@ -230,10 +232,10 @@ export class UsersService {
 
       if (tx.transactionType === 'BUY') {
         existing.totalShares += BigInt(tx.shares);
-        existing.totalInvested += BigInt(tx.totalPrice);
+        existing.totalInvested += BigInt(tx.totalAmount);
       } else if (tx.transactionType === 'SELL') {
         existing.totalShares -= BigInt(tx.shares);
-        existing.totalInvested -= BigInt(tx.totalPrice);
+        existing.totalInvested -= BigInt(tx.totalAmount);
       }
 
       portfolioMap.set(creatorAddress, existing);
@@ -246,7 +248,9 @@ export class UsersService {
     });
 
     for (const claim of dividendClaims) {
-      const creatorAddress = claim.claimableDividend.dividendEpoch.creatorAddress;
+      const creatorAddress = claim.claimableDividend?.dividendEpoch?.creatorAddress;
+      if (!creatorAddress) continue; // Skip if no creator address
+
       const existing = portfolioMap.get(creatorAddress);
       if (existing) {
         existing.totalDividends += BigInt(claim.amount);
@@ -269,12 +273,12 @@ export class UsersService {
         user.walletAddress,
       );
 
-      if (BigInt(currentBalance.balance) <= BigInt(0)) continue;
+      if (currentBalance <= BigInt(0)) continue;
 
       // Get current sell price
       const sellPrice = await this.creatorShareService.getSellPrice(
         creatorAddress,
-        BigInt(currentBalance.balance),
+        currentBalance,
       );
 
       const currentValue = BigInt(sellPrice.priceInUSDC);
@@ -286,7 +290,7 @@ export class UsersService {
         creatorAddress,
         creatorHandle: data.creatorHandle,
         creatorName: data.creatorName,
-        sharesHeld: currentBalance.balanceFormatted,
+        sharesHeld: this.formatUSDC(currentBalance),
         averageBuyPrice: this.formatUSDC(averageBuyPrice),
         currentValue: sellPrice.priceFormatted,
         profitLoss: this.formatUSDC(profitLoss),
@@ -316,12 +320,14 @@ export class UsersService {
     const positions = await this.marketPositionRepository.find({
       where: { userAddress: user.walletAddress },
       relations: ['opinionMarket'],
-      order: { lastUpdated: 'DESC' },
+      order: { updatedAt: 'DESC' },
     });
 
     const result: UserMarketPositionDto[] = [];
 
     for (const position of positions) {
+      if (!position.opinionMarket.marketId) continue; // Skip positions without market ID
+
       const marketInfo = await this.opinionMarketService.getMarketInfo(
         BigInt(position.opinionMarket.marketId),
       );
@@ -337,7 +343,8 @@ export class UsersService {
       if (marketInfo.resolved) {
         // Market resolved - calculate winnings
         const winningShares = marketInfo.winningOutcome ? yesShares : noShares;
-        claimableWinnings = this.formatUSDC(winningShares * BigInt(marketInfo.liquidityPool) / BigInt(marketInfo.totalYesShares + marketInfo.totalNoShares));
+        const totalShares = marketInfo.yesShares + marketInfo.noShares;
+        claimableWinnings = this.formatUSDC(winningShares * BigInt(marketInfo.liquidityPool) / BigInt(totalShares));
         currentValue = BigInt(claimableWinnings.replace('.', '').padEnd(6, '0'));
       } else {
         // Market active - estimate current value based on probabilities
@@ -351,14 +358,14 @@ export class UsersService {
       result.push({
         marketId: position.opinionMarket.marketId.toString(),
         question: position.opinionMarket.question,
-        creatorAddress: position.opinionMarket.creatorAddress,
+        creatorAddress: position.opinionMarket.creatorAddress || '',
         yesShares: this.formatUSDC(yesShares),
         noShares: this.formatUSDC(noShares),
         totalInvested: this.formatUSDC(totalInvested),
         currentValue: this.formatUSDC(currentValue),
         status: marketInfo.resolved ? 'RESOLVED' : (marketInfo.cancelled ? 'CANCELLED' : 'ACTIVE'),
         endTime: new Date(Number(marketInfo.endTime) * 1000),
-        winningOutcome: marketInfo.resolved ? marketInfo.winningOutcome : undefined,
+        winningOutcome: marketInfo.resolved && marketInfo.winningOutcome !== null ? marketInfo.winningOutcome : undefined,
         claimableWinnings,
       });
     }
@@ -389,24 +396,26 @@ export class UsersService {
     // Get share transactions
     const shareTransactions = await this.shareTransactionRepository.find({
       where: { buyer: user.walletAddress },
-      relations: ['creatorShare'],
+      relations: ['creator', 'creator.user'],
       order: { timestamp: 'DESC' },
       take: limit,
       skip: offset,
     });
 
     for (const tx of shareTransactions) {
+      if (!tx.creator?.creatorAddress || !tx.txHash) continue;
+
       transactions.push({
         id: tx.id,
         type: tx.transactionType === 'BUY' ? 'SHARE_BUY' : 'SHARE_SELL',
-        transactionHash: tx.transactionHash,
-        relatedAddress: tx.creatorShare.creatorAddress,
-        amount: this.formatUSDC(BigInt(tx.totalPrice)),
+        transactionHash: tx.txHash,
+        relatedAddress: tx.creator.creatorAddress,
+        amount: this.formatUSDC(BigInt(tx.totalAmount)),
         shares: this.formatUSDC(BigInt(tx.shares)),
         timestamp: tx.timestamp,
         status: 'SUCCESS',
         details: {
-          pricePerShare: this.formatUSDC(BigInt(tx.pricePerShare)),
+          pricePerShare: this.formatUSDC(BigInt(tx.pricePerShare || 0)),
           protocolFee: this.formatUSDC(BigInt(tx.protocolFee)),
           creatorFee: this.formatUSDC(BigInt(tx.creatorFee)),
         },
@@ -423,6 +432,8 @@ export class UsersService {
     });
 
     for (const trade of marketTrades) {
+      if (!trade.transactionHash || !trade.opinionMarket?.creatorAddress) continue;
+
       transactions.push({
         id: trade.id,
         type: 'MARKET_BET',
@@ -449,6 +460,8 @@ export class UsersService {
     });
 
     for (const claim of dividendClaims) {
+      if (!claim.transactionHash || !claim.claimableDividend?.dividendEpoch?.creatorAddress) continue;
+
       transactions.push({
         id: claim.id,
         type: 'DIVIDEND_CLAIM',

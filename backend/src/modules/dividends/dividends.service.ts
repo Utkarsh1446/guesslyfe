@@ -183,6 +183,10 @@ export class DividendsService {
     const claimDtos: DividendClaimDto[] = [];
 
     for (const claim of claims) {
+      if (!claim.claimer || !claim.claimableDividend?.dividendEpoch?.creatorAddress || !claim.transactionHash) {
+        continue; // Skip invalid claims
+      }
+
       // Try to find user by wallet address
       const user = await this.userRepository.findOne({
         where: { walletAddress: claim.claimer.toLowerCase() },
@@ -196,7 +200,7 @@ export class DividendsService {
         claimerHandle: user?.twitterHandle,
         amount: this.formatUSDC(BigInt(claim.amount)),
         transactionHash: claim.transactionHash,
-        blockNumber: claim.blockNumber,
+        blockNumber: claim.blockNumber || 0,
         claimedAt: claim.claimedAt,
       });
     }
@@ -256,17 +260,23 @@ export class DividendsService {
       skip: offset,
     });
 
-    return claims.map((claim) => ({
-      id: claim.id,
-      creatorAddress: claim.claimableDividend.dividendEpoch.creatorAddress,
-      epochNumber: claim.claimableDividend.dividendEpoch.epochNumber,
-      claimer: claim.claimer,
-      claimerHandle: user.twitterHandle,
-      amount: this.formatUSDC(BigInt(claim.amount)),
-      transactionHash: claim.transactionHash,
-      blockNumber: claim.blockNumber,
-      claimedAt: claim.claimedAt,
-    }));
+    return claims
+      .filter(claim =>
+        claim.claimer &&
+        claim.claimableDividend?.dividendEpoch?.creatorAddress &&
+        claim.transactionHash
+      )
+      .map((claim) => ({
+        id: claim.id,
+        creatorAddress: claim.claimableDividend!.dividendEpoch!.creatorAddress,
+        epochNumber: claim.claimableDividend!.dividendEpoch!.epochNumber,
+        claimer: claim.claimer!,
+        claimerHandle: user.twitterHandle,
+        amount: this.formatUSDC(BigInt(claim.amount)),
+        transactionHash: claim.transactionHash!,
+        blockNumber: claim.blockNumber || 0,
+        claimedAt: claim.claimedAt,
+      }));
   }
 
   /**
@@ -292,14 +302,14 @@ export class DividendsService {
 
     return new DividendEpochDto({
       id: epoch.id,
-      creatorAddress: epoch.creatorAddress,
+      creatorAddress: epoch.creatorAddress || '',
       epochNumber: epoch.epochNumber,
       startTime: epoch.startTime,
       endTime: epoch.endTime,
       totalDividends: this.formatUSDC(totalDividends),
       totalSharesAtSnapshot: this.formatUSDC(BigInt(epoch.totalSharesAtSnapshot)),
       isFinalized: epoch.isFinalized,
-      finalizedAt: epoch.finalizedAt,
+      finalizedAt: epoch.finalizedAt || undefined,
       totalClaimed: this.formatUSDC(totalClaimed),
       totalUnclaimed: this.formatUSDC(totalUnclaimed),
       claimantCount: claimCount,
@@ -313,15 +323,15 @@ export class DividendsService {
   private buildClaimableDto(claimable: ClaimableDividend): ClaimableDividendDto {
     return new ClaimableDividendDto({
       id: claimable.id,
-      creatorAddress: claimable.dividendEpoch.creatorAddress,
-      epochNumber: claimable.dividendEpoch.epochNumber,
-      shareholder: claimable.shareholder,
+      creatorAddress: claimable.dividendEpoch?.creatorAddress || '',
+      epochNumber: claimable.dividendEpoch?.epochNumber || 0,
+      shareholder: claimable.shareholder || '',
       sharesHeld: this.formatUSDC(BigInt(claimable.sharesHeld)),
       claimableAmount: this.formatUSDC(BigInt(claimable.claimableAmount)),
       isClaimed: claimable.isClaimed,
-      claimedAt: claimable.claimedAt,
-      transactionHash: claimable.transactionHash,
-      epochEndTime: claimable.dividendEpoch.endTime,
+      claimedAt: claimable.claimedAt || undefined,
+      transactionHash: claimable.transactionHash || undefined,
+      epochEndTime: claimable.dividendEpoch?.endTime || new Date(),
     });
   }
 
@@ -355,7 +365,9 @@ export class DividendsService {
     const byCreatorMap = new Map<string, ClaimableDividend[]>();
 
     for (const c of claimable) {
-      const creatorAddress = c.dividendEpoch.creatorAddress;
+      const creatorAddress = c.dividendEpoch?.creatorAddress;
+      if (!creatorAddress) continue;
+
       if (!byCreatorMap.has(creatorAddress)) {
         byCreatorMap.set(creatorAddress, []);
       }
@@ -383,14 +395,16 @@ export class DividendsService {
       totalAmount += creatorTotal;
 
       // Get earliest and latest epochs
-      const epochs = dividends.map((d) => d.dividendEpoch);
+      const epochs = dividends.map((d) => d.dividendEpoch).filter((e): e is NonNullable<typeof e> => e !== null);
+      if (epochs.length === 0) continue;
+
       const earliestEpoch = Math.min(...epochs.map((e) => e.epochNumber));
       const latestEpoch = Math.max(...epochs.map((e) => e.epochNumber));
 
       // Calculate days since first claimable
       const firstEndTime = epochs.sort(
         (a, b) => a.endTime.getTime() - b.endTime.getTime(),
-      )[0].endTime;
+      )[0]!.endTime;
       const daysSinceFirst = Math.floor((Date.now() - firstEndTime.getTime()) / (1000 * 60 * 60 * 24));
 
       // Check if meets requirements
@@ -454,7 +468,7 @@ export class DividendsService {
     });
 
     const relevantDividends = claimable.filter((c) =>
-      creatorIds.includes(c.dividendEpoch.creatorAddress.toLowerCase()),
+      c.dividendEpoch?.creatorAddress && creatorIds.includes(c.dividendEpoch.creatorAddress.toLowerCase()),
     );
 
     if (relevantDividends.length === 0) {
@@ -465,9 +479,15 @@ export class DividendsService {
     const creatorHandles: string[] = [];
     let totalAmount = BigInt(0);
 
-    const uniqueCreators = new Set(relevantDividends.map((d) => d.dividendEpoch.creatorAddress));
+    const uniqueCreators = new Set(
+      relevantDividends
+        .map((d) => d.dividendEpoch?.creatorAddress)
+        .filter((addr): addr is string => addr !== null && addr !== undefined)
+    );
 
     for (const creatorAddress of uniqueCreators) {
+      if (!creatorAddress) continue;
+
       const creator = await this.creatorRepository.findOne({
         where: { creatorAddress: creatorAddress.toLowerCase() },
         relations: ['user'],
@@ -479,7 +499,7 @@ export class DividendsService {
 
       // Calculate total for this creator
       const creatorDividends = relevantDividends.filter(
-        (d) => d.dividendEpoch.creatorAddress === creatorAddress,
+        (d) => d.dividendEpoch?.creatorAddress === creatorAddress,
       );
       totalAmount += creatorDividends.reduce(
         (sum, d) => sum + BigInt(d.claimableAmount),
@@ -559,7 +579,7 @@ export class DividendsService {
     });
 
     const relevantDividends = claimable.filter((c) =>
-      creatorIds.includes(c.dividendEpoch.creatorAddress.toLowerCase()),
+      c.dividendEpoch?.creatorAddress && creatorIds.includes(c.dividendEpoch.creatorAddress.toLowerCase()),
     );
 
     if (relevantDividends.length === 0) {
@@ -572,29 +592,32 @@ export class DividendsService {
       BigInt(0),
     );
 
+    // TODO: Implement getCreatorShareFactoryContract and getContractAddress in ContractsService
+    throw new BadRequestException('Claim workflow not yet implemented - missing contract methods');
+
     // Get CreatorShareFactory contract
-    const factoryContract = await this.contractsService.getCreatorShareFactoryContract();
+    // const factoryContract = await this.contractsService.getCreatorShareFactoryContract();
 
     // Encode function call: claimDividends(address[] creators)
-    const data = factoryContract.interface.encodeFunctionData('claimDividends', [
-      creatorIds.map((id) => id.toLowerCase()),
-    ]);
+    // const data = factoryContract.interface.encodeFunctionData('claimDividends', [
+    //   creatorIds.map((id) => id.toLowerCase()),
+    // ]);
 
-    const unsignedTx = {
-      to: await this.contractsService.getContractAddress('CreatorShareFactory'),
-      data,
-      value: '0',
-      gasLimit: '500000',
-      description: `Claim ${this.formatUSDC(totalAmount)} USDC in dividends from ${creatorIds.length} creator(s)`,
-    };
+    // const unsignedTx = {
+    //   to: await this.contractsService.getContractAddress('CreatorShareFactory'),
+    //   data,
+    //   value: '0',
+    //   gasLimit: '500000',
+    //   description: `Claim ${this.formatUSDC(totalAmount)} USDC in dividends from ${creatorIds.length} creator(s)`,
+    // };
 
-    return new CompleteClaimResponseDto({
-      unsignedTx,
-      amount: this.formatUSDC(totalAmount),
-      creators: creatorIds,
-      tweetId: verification.tweetId,
-      tweetVerified: true,
-    });
+    // return new CompleteClaimResponseDto({
+    //   unsignedTx,
+    //   amount: this.formatUSDC(totalAmount),
+    //   creators: creatorIds,
+    //   tweetId: verification.tweetId,
+    //   tweetVerified: true,
+    // });
   }
 
   /**
