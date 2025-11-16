@@ -1,0 +1,359 @@
+# ==============================================================================
+# GCP Cloud Monitoring Alert Policies Configuration
+# ==============================================================================
+#
+# This file defines alert policies for production monitoring.
+# Apply with: gcloud alpha monitoring policies create --policy-from-file=FILE
+#
+# Prerequisites:
+# - GCP project with Cloud Monitoring API enabled
+# - Notification channels configured (email, SMS, PagerDuty, etc.)
+#
+# ==============================================================================
+
+# Alert: High Error Rate
+- displayName: "High Error Rate (>1%)"
+  documentation:
+    content: |
+      Error rate has exceeded 1% threshold.
+
+      **Severity**: Warning
+      **Impact**: Users may be experiencing failures
+
+      **Investigation Steps**:
+      1. Check logs: `gcloud logging read "severity>=ERROR" --limit=50`
+      2. View detailed health: `curl https://api.guesslyfe.com/api/v1/health/detailed`
+      3. Check Sentry for error details
+      4. Review recent deployments
+
+      **Escalation**: If error rate >5% or duration >10 minutes, page on-call engineer
+    mimeType: text/markdown
+  conditions:
+    - displayName: "Error rate >1%"
+      conditionThreshold:
+        filter: |
+          resource.type = "cloud_run_revision"
+          AND resource.labels.service_name = "guesslyfe-backend"
+          AND metric.type = "run.googleapis.com/request_count"
+          AND metric.labels.response_code_class = "5xx"
+        comparison: COMPARISON_GT
+        thresholdValue: 0.01
+        duration: 300s  # 5 minutes
+        aggregations:
+          - alignmentPeriod: 60s
+            perSeriesAligner: ALIGN_RATE
+            crossSeriesReducer: REDUCE_SUM
+            groupByFields:
+              - resource.labels.service_name
+  combiner: OR
+  enabled: true
+  notificationChannels:
+    - projects/PROJECT_ID/notificationChannels/CHANNEL_ID  # Replace with actual channel ID
+  alertStrategy:
+    autoClose: 1800s  # Auto-close after 30 minutes
+    notificationRateLimit:
+      period: 300s  # Re-notify every 5 minutes if still alerting
+
+---
+
+# Alert: High Response Time
+- displayName: "High Response Time (>2s)"
+  documentation:
+    content: |
+      API response time has exceeded 2 seconds (95th percentile).
+
+      **Severity**: Warning
+      **Impact**: Users experiencing slow performance
+
+      **Investigation Steps**:
+      1. Check performance metrics: View GCP Dashboard
+      2. Identify slow endpoints: Check logs with `duration_ms>2000`
+      3. Check database performance: `SELECT * FROM pg_stat_statements ORDER BY mean_exec_time DESC LIMIT 10`
+      4. Review Redis latency: `redis-cli --latency`
+      5. Check blockchain RPC performance
+
+      **Common Causes**:
+      - Slow database queries (missing indexes)
+      - High traffic without autoscaling
+      - External API delays (blockchain RPC)
+      - Memory pressure causing GC pauses
+    mimeType: text/markdown
+  conditions:
+    - displayName: "P95 latency >2s"
+      conditionThreshold:
+        filter: |
+          resource.type = "cloud_run_revision"
+          AND resource.labels.service_name = "guesslyfe-backend"
+          AND metric.type = "run.googleapis.com/request_latencies"
+        comparison: COMPARISON_GT
+        thresholdValue: 2000  # 2000ms = 2s
+        duration: 300s  # 5 minutes
+        aggregations:
+          - alignmentPeriod: 60s
+            perSeriesAligner: ALIGN_DELTA
+            crossSeriesReducer: REDUCE_PERCENTILE_95
+            groupByFields:
+              - resource.labels.service_name
+  combiner: OR
+  enabled: true
+  notificationChannels:
+    - projects/PROJECT_ID/notificationChannels/CHANNEL_ID
+  alertStrategy:
+    autoClose: 1800s
+
+---
+
+# Alert: Database Connection Failures
+- displayName: "Database Connection Failures"
+  documentation:
+    content: |
+      Database connections are failing.
+
+      **Severity**: CRITICAL
+      **Impact**: Application cannot serve requests
+
+      **Immediate Actions**:
+      1. Check database status: `gcloud sql instances describe guesslyfe-db`
+      2. Check Cloud SQL Proxy: Verify VPC connector is healthy
+      3. Check connection pool: Review health endpoint for database status
+      4. Check credentials: Verify Secret Manager has correct password
+
+      **Recovery Steps**:
+      1. Restart Cloud Run service if connection pool exhausted
+      2. Scale up Cloud SQL if CPU/memory is high
+      3. Check for long-running queries: `SELECT * FROM pg_stat_activity WHERE state = 'active'`
+
+      **Escalation**: Page database admin immediately
+    mimeType: text/markdown
+  conditions:
+    - displayName: "Database health check failing"
+      conditionThreshold:
+        filter: |
+          resource.type = "cloud_run_revision"
+          AND resource.labels.service_name = "guesslyfe-backend"
+          AND metric.type = "logging.googleapis.com/user/database_health"
+          AND metric.labels.status = "unhealthy"
+        comparison: COMPARISON_GT
+        thresholdValue: 0
+        duration: 60s  # 1 minute
+        aggregations:
+          - alignmentPeriod: 60s
+            perSeriesAligner: ALIGN_RATE
+  combiner: OR
+  enabled: true
+  notificationChannels:
+    - projects/PROJECT_ID/notificationChannels/CRITICAL_CHANNEL_ID
+  alertStrategy:
+    autoClose: 300s
+    notificationRateLimit:
+      period: 60s  # Re-notify every minute
+
+---
+
+# Alert: Queue Processing Delays
+- displayName: "Queue Processing Delays (>5min)"
+  documentation:
+    content: |
+      Background job processing is delayed by more than 5 minutes.
+
+      **Severity**: Warning
+      **Impact**: Notifications and scheduled tasks delayed
+
+      **Investigation Steps**:
+      1. Check queue status via health endpoint
+      2. Check Redis memory usage
+      3. Review job logs for errors
+      4. Check if workers are running
+
+      **Common Causes**:
+      - Too many jobs in queue
+      - Slow job processing (external API calls)
+      - Worker crashes
+      - Redis connection issues
+    mimeType: text/markdown
+  conditions:
+    - displayName: "Queue delay >5min"
+      conditionThreshold:
+        filter: |
+          resource.type = "cloud_run_revision"
+          AND metric.type = "custom.googleapis.com/queue/processing_delay_seconds"
+        comparison: COMPARISON_GT
+        thresholdValue: 300  # 5 minutes
+        duration: 120s
+        aggregations:
+          - alignmentPeriod: 60s
+            perSeriesAligner: ALIGN_MAX
+  combiner: OR
+  enabled: true
+  notificationChannels:
+    - projects/PROJECT_ID/notificationChannels/CHANNEL_ID
+  alertStrategy:
+    autoClose: 600s
+
+---
+
+# Alert: High Memory Usage
+- displayName: "High Memory Usage (>80%)"
+  documentation:
+    content: |
+      Memory usage has exceeded 80% threshold.
+
+      **Severity**: Warning
+      **Impact**: Risk of OOM kills and service restarts
+
+      **Investigation Steps**:
+      1. Check memory metrics in GCP Console
+      2. Review detailed health endpoint for memory breakdown
+      3. Check for memory leaks: Review heap snapshots
+      4. Identify memory-intensive endpoints
+
+      **Actions**:
+      - If sustained >85%: Increase Cloud Run memory allocation
+      - Review recent code changes for memory leaks
+      - Check if caching is excessive
+    mimeType: text/markdown
+  conditions:
+    - displayName: "Memory utilization >80%"
+      conditionThreshold:
+        filter: |
+          resource.type = "cloud_run_revision"
+          AND resource.labels.service_name = "guesslyfe-backend"
+          AND metric.type = "run.googleapis.com/container/memory/utilizations"
+        comparison: COMPARISON_GT
+        thresholdValue: 0.80  # 80%
+        duration: 300s
+        aggregations:
+          - alignmentPeriod: 60s
+            perSeriesAligner: ALIGN_MEAN
+            crossSeriesReducer: REDUCE_MAX
+            groupByFields:
+              - resource.labels.service_name
+  combiner: OR
+  enabled: true
+  notificationChannels:
+    - projects/PROJECT_ID/notificationChannels/CHANNEL_ID
+  alertStrategy:
+    autoClose: 900s
+
+---
+
+# Alert: High Disk Usage (Cloud SQL)
+- displayName: "High Disk Usage (>80%)"
+  documentation:
+    content: |
+      Cloud SQL disk usage has exceeded 80%.
+
+      **Severity**: Warning
+      **Impact**: Risk of disk full, database writes will fail
+
+      **Investigation Steps**:
+      1. Check disk usage: `gcloud sql instances describe guesslyfe-db`
+      2. Identify large tables: `SELECT schemaname, tablename, pg_size_pretty(pg_total_relation_size(schemaname||'.'||tablename)) FROM pg_tables ORDER BY pg_total_relation_size(schemaname||'.'||tablename) DESC LIMIT 10`
+      3. Review old data that can be archived
+
+      **Actions**:
+      - If >85%: Increase disk size immediately
+      - Review data retention policies
+      - Clean up old logs or test data
+      - Consider archiving historical data
+    mimeType: text/markdown
+  conditions:
+    - displayName: "Disk utilization >80%"
+      conditionThreshold:
+        filter: |
+          resource.type = "cloudsql_database"
+          AND resource.labels.database_id = "PROJECT_ID:guesslyfe-db"
+          AND metric.type = "cloudsql.googleapis.com/database/disk/utilization"
+        comparison: COMPARISON_GT
+        thresholdValue: 0.80
+        duration: 300s
+        aggregations:
+          - alignmentPeriod: 60s
+            perSeriesAligner: ALIGN_MEAN
+  combiner: OR
+  enabled: true
+  notificationChannels:
+    - projects/PROJECT_ID/notificationChannels/CHANNEL_ID
+  alertStrategy:
+    autoClose: 900s
+
+---
+
+# Alert: SSL Certificate Expiring
+- displayName: "SSL Certificate Expiring (14 days)"
+  documentation:
+    content: |
+      SSL certificate will expire in 14 days or less.
+
+      **Severity**: Warning
+      **Impact**: Service will become inaccessible when certificate expires
+
+      **Actions**:
+      1. Renew SSL certificate immediately
+      2. Update Cloud Run domain mapping
+      3. Verify certificate installation
+      4. Test HTTPS endpoint
+
+      **Note**: Cloud Run managed certificates auto-renew, but custom certificates need manual renewal.
+    mimeType: text/markdown
+  conditions:
+    - displayName: "Certificate expiring soon"
+      conditionThreshold:
+        filter: |
+          resource.type = "cloud_run_revision"
+          AND metric.type = "custom.googleapis.com/ssl/days_until_expiry"
+        comparison: COMPARISON_LT
+        thresholdValue: 14  # 14 days
+        duration: 3600s  # Check hourly
+        aggregations:
+          - alignmentPeriod: 3600s
+            perSeriesAligner: ALIGN_MIN
+  combiner: OR
+  enabled: true
+  notificationChannels:
+    - projects/PROJECT_ID/notificationChannels/CHANNEL_ID
+  alertStrategy:
+    autoClose: 86400s  # Auto-close after 24 hours
+
+---
+
+# Alert: Instance Restarts
+- displayName: "Frequent Instance Restarts"
+  documentation:
+    content: |
+      Cloud Run instances are restarting frequently (>3 in 10 minutes).
+
+      **Severity**: Warning
+      **Impact**: Service instability, potential data loss
+
+      **Investigation Steps**:
+      1. Check logs for crash reasons: `gcloud logging read "resource.type=cloud_run_revision" --limit=100`
+      2. Review exit codes and error messages
+      3. Check memory usage before crashes
+      4. Review recent deployments
+
+      **Common Causes**:
+      - Out of memory errors (OOM kills)
+      - Uncaught exceptions causing crashes
+      - Health check failures
+      - Bad deployment
+    mimeType: text/markdown
+  conditions:
+    - displayName: "Instance restarts >3 in 10min"
+      conditionThreshold:
+        filter: |
+          resource.type = "cloud_run_revision"
+          AND resource.labels.service_name = "guesslyfe-backend"
+          AND metric.type = "run.googleapis.com/container/instance_count"
+        comparison: COMPARISON_GT
+        thresholdValue: 3
+        duration: 600s  # 10 minutes
+        aggregations:
+          - alignmentPeriod: 60s
+            perSeriesAligner: ALIGN_RATE
+  combiner: OR
+  enabled: true
+  notificationChannels:
+    - projects/PROJECT_ID/notificationChannels/CHANNEL_ID
+  alertStrategy:
+    autoClose: 600s
