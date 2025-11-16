@@ -22,6 +22,7 @@ import { DividendEpoch } from '../database/entities/dividend-epoch.entity';
 import { ShareTransaction } from '../database/entities/share-transaction.entity';
 import { MarketTrade } from '../database/entities/market-trade.entity';
 import { OpinionMarket } from '../database/entities/opinion-market.entity';
+import { MarketPosition } from '../database/entities/market-position.entity';
 
 // Services (will be injected into processors)
 import { DividendsModule } from '../modules/dividends/dividends.module';
@@ -39,6 +40,7 @@ import { ContractsModule } from '../contracts/contracts.module';
       ShareTransaction,
       MarketTrade,
       OpinionMarket,
+      MarketPosition,
     ]),
 
     // Schedule module for cron jobs (already registered globally in AppModule)

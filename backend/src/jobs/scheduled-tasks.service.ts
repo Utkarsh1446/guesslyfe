@@ -3,14 +3,15 @@ import { Cron, CronExpression, SchedulerRegistry } from '@nestjs/schedule';
 import { InjectQueue } from '@nestjs/bull';
 import { Queue } from 'bull';
 import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, DataSource, LessThanOrEqual } from 'typeorm';
+import { Repository, DataSource, LessThanOrEqual, MoreThan, LessThan, Between } from 'typeorm';
 import { Creator } from '../database/entities/creator.entity';
 import { DividendEpoch } from '../database/entities/dividend-epoch.entity';
 import { ShareTransaction } from '../database/entities/share-transaction.entity';
 import { MarketTrade } from '../database/entities/market-trade.entity';
 import { OpinionMarket } from '../database/entities/opinion-market.entity';
+import { MarketPosition } from '../database/entities/market-position.entity';
 import { QUEUE_NAMES, JOB_TYPES } from './queue.constants';
-import { CreatorStatus } from '../database/enums';
+import { CreatorStatus, MarketStatus } from '../database/enums';
 import { CreatorShareFactoryService } from '../contracts/creator-share-factory.service';
 import { TwitterScraperService } from '../modules/twitter/twitter-scraper.service';
 
@@ -26,6 +27,10 @@ export class ScheduledTasksService {
   private readonly TWITTER_API_RATE_LIMIT = 450; // Requests per 15 minutes
   private readonly TWITTER_BATCH_SIZE = 100; // Process 100 creators at a time
   private readonly TWITTER_CACHE_TTL = 6 * 60 * 60 * 1000; // 6 hours in milliseconds
+  private readonly MARKET_ENDING_SOON_THRESHOLD_MS = 60 * 60 * 1000; // 1 hour
+  private readonly MARKET_OVERDUE_THRESHOLD_MS = 60 * 60 * 1000; // 1 hour
+  private readonly VOLUME_SPIKE_THRESHOLD = 5; // 5x average volume = suspicious
+  private readonly VOLUME_LOOKBACK_MINUTES = 15; // Check volume in last 15 minutes
 
   constructor(
     @InjectRepository(Creator)
@@ -38,6 +43,8 @@ export class ScheduledTasksService {
     private readonly marketTradeRepository: Repository<MarketTrade>,
     @InjectRepository(OpinionMarket)
     private readonly opinionMarketRepository: Repository<OpinionMarket>,
+    @InjectRepository(MarketPosition)
+    private readonly marketPositionRepository: Repository<MarketPosition>,
     @InjectQueue(QUEUE_NAMES.EPOCH_FINALIZER)
     private readonly epochQueue: Queue,
     @InjectQueue(QUEUE_NAMES.DIVIDEND_CALCULATOR)
@@ -48,6 +55,8 @@ export class ScheduledTasksService {
     private readonly volumeTrackerQueue: Queue,
     @InjectQueue(QUEUE_NAMES.TWITTER_SCRAPER)
     private readonly twitterScraperQueue: Queue,
+    @InjectQueue(QUEUE_NAMES.MARKET_CHECKER)
+    private readonly marketCheckerQueue: Queue,
     private readonly dataSource: DataSource,
     private readonly schedulerRegistry: SchedulerRegistry,
     private readonly creatorShareFactoryService: CreatorShareFactoryService,
@@ -1078,6 +1087,454 @@ export class ScheduledTasksService {
   }
 
   /**
+   * Market Status Monitoring Job
+   * Runs every 15 minutes to monitor market statuses and send notifications
+   * Cron: 'every 15 minutes' (minute hour day month dayOfWeek)
+   */
+  @Cron('*/15 * * * *', {
+    name: 'check-market-statuses',
+    timeZone: 'UTC',
+  })
+  async checkMarketStatuses() {
+    const startTime = Date.now();
+    const jobName = 'Market Status Check';
+
+    this.logger.log(`========================================`);
+    this.logger.log(`Starting ${jobName} at ${new Date().toISOString()}`);
+    this.logger.log(`========================================`);
+
+    try {
+      // Execute market status checks
+      await this.executeMarketStatusChecks();
+
+      const executionTime = Date.now() - startTime;
+      this.logger.log(`${jobName} completed successfully in ${executionTime}ms`);
+
+      // Alert if execution took too long (>5 minutes warning threshold)
+      if (executionTime > 5 * 60 * 1000) {
+        this.logger.warn(`⚠️  ${jobName} took ${executionTime}ms - consider optimization`);
+        await this.sendAlert({
+          type: 'warning',
+          message: `${jobName} took ${executionTime}ms`,
+          threshold: '5 minutes',
+        });
+      }
+
+    } catch (error) {
+      const executionTime = Date.now() - startTime;
+      this.logger.error(
+        `❌ ${jobName} FAILED after ${executionTime}ms: ${error.message}`,
+        error.stack,
+      );
+
+      // Send critical alert
+      await this.sendAlert({
+        type: 'critical',
+        message: `${jobName} failed: ${error.message}`,
+        stack: error.stack,
+        executionTime,
+      });
+
+      // Re-throw to mark job as failed
+      throw error;
+    }
+  }
+
+  /**
+   * Execute the complete market status checking workflow
+   */
+  private async executeMarketStatusChecks(): Promise<void> {
+    const now = new Date();
+    const oneHourFromNow = new Date(now.getTime() + this.MARKET_ENDING_SOON_THRESHOLD_MS);
+    const oneHourAgo = new Date(now.getTime() - this.MARKET_OVERDUE_THRESHOLD_MS);
+
+    const results = {
+      endingSoon: 0,
+      overdue: 0,
+      suspicious: 0,
+      statisticsUpdated: 0,
+      failed: 0,
+      errors: [] as any[],
+    };
+
+    // 1. Check for markets ending soon (within 1 hour)
+    try {
+      const endingSoonCount = await this.checkMarketsEndingSoon(now, oneHourFromNow);
+      results.endingSoon = endingSoonCount;
+    } catch (error) {
+      results.failed++;
+      results.errors.push({ check: 'ending-soon', error: error.message });
+      this.logger.error(`Failed to check ending soon markets: ${error.message}`);
+    }
+
+    // 2. Check for overdue markets (past end time but not resolved)
+    try {
+      const overdueCount = await this.checkOverdueMarkets(now, oneHourAgo);
+      results.overdue = overdueCount;
+    } catch (error) {
+      results.failed++;
+      results.errors.push({ check: 'overdue', error: error.message });
+      this.logger.error(`Failed to check overdue markets: ${error.message}`);
+    }
+
+    // 3. Check for suspicious activity
+    try {
+      const suspiciousCount = await this.checkSuspiciousActivity(now);
+      results.suspicious = suspiciousCount;
+    } catch (error) {
+      results.failed++;
+      results.errors.push({ check: 'suspicious', error: error.message });
+      this.logger.error(`Failed to check suspicious activity: ${error.message}`);
+    }
+
+    // 4. Update market statistics
+    try {
+      const updatedCount = await this.updateMarketStatistics();
+      results.statisticsUpdated = updatedCount;
+    } catch (error) {
+      results.failed++;
+      results.errors.push({ check: 'statistics', error: error.message });
+      this.logger.error(`Failed to update market statistics: ${error.message}`);
+    }
+
+    // Log summary
+    this.logger.log(`========================================`);
+    this.logger.log(`Market Status Check Summary:`);
+    this.logger.log(`  ⏰ Ending Soon: ${results.endingSoon}`);
+    this.logger.log(`  ⚠️  Overdue: ${results.overdue}`);
+    this.logger.log(`  🚨 Suspicious: ${results.suspicious}`);
+    this.logger.log(`  📊 Statistics Updated: ${results.statisticsUpdated}`);
+    this.logger.log(`  ❌ Failed Checks: ${results.failed}`);
+    if (results.failed > 0) {
+      this.logger.error(`  Errors:`, JSON.stringify(results.errors, null, 2));
+    }
+    this.logger.log(`========================================`);
+  }
+
+  /**
+   * Check for markets ending within 1 hour and send notifications
+   */
+  private async checkMarketsEndingSoon(now: Date, oneHourFromNow: Date): Promise<number> {
+    // Find active markets ending within the next hour
+    const endingSoonMarkets = await this.opinionMarketRepository.find({
+      where: {
+        status: MarketStatus.ACTIVE,
+        endTime: Between(now, oneHourFromNow),
+      },
+      relations: ['creator'],
+    });
+
+    this.logger.log(`Found ${endingSoonMarkets.length} markets ending within 1 hour`);
+
+    for (const market of endingSoonMarkets) {
+      try {
+        // Get all participants (users with positions)
+        const participants = await this.marketPositionRepository
+          .createQueryBuilder('position')
+          .select('DISTINCT position.userAddress', 'userAddress')
+          .where('position.marketId = :marketId', { marketId: market.id })
+          .andWhere('position.shares > 0')
+          .getRawMany();
+
+        const minutesRemaining = Math.floor((market.endTime.getTime() - now.getTime()) / (1000 * 60));
+
+        this.logger.log(
+          `Market "${market.title}" ending in ${minutesRemaining} minutes - notifying ${participants.length} participants`
+        );
+
+        // Send notification to each participant
+        for (const participant of participants) {
+          await this.notificationQueue.add(
+            JOB_TYPES.NOTIFICATION.SEND_EMAIL,
+            {
+              type: 'email',
+              recipient: participant.userAddress,
+              subject: `Market ending soon: ${market.title}`,
+              body: `The market "${market.title}" will close in approximately ${minutesRemaining} minutes. Make your final trades now!`,
+              data: {
+                marketId: market.id,
+                marketTitle: market.title,
+                endTime: market.endTime,
+                minutesRemaining,
+              },
+            },
+            {
+              priority: 2,
+              delay: 1000,
+            },
+          );
+        }
+
+        // Send notification to admin for resolution prep
+        await this.notificationQueue.add(
+          JOB_TYPES.NOTIFICATION.SEND_WEBHOOK,
+          {
+            type: 'webhook',
+            recipient: process.env.ALERT_WEBHOOK_URL || 'http://localhost:3000/alerts',
+            subject: `Market Resolution Required Soon: ${market.title}`,
+            data: {
+              marketId: market.id,
+              marketTitle: market.title,
+              creatorHandle: market.creator?.twitterHandle,
+              endTime: market.endTime,
+              minutesRemaining,
+              totalTrades: market.totalTrades,
+              volume: market.volume,
+            },
+          },
+          {
+            priority: 2,
+            delay: 2000,
+          },
+        );
+
+      } catch (error) {
+        this.logger.error(`Failed to notify for market ${market.id}: ${error.message}`);
+      }
+    }
+
+    return endingSoonMarkets.length;
+  }
+
+  /**
+   * Check for markets past end time but not resolved
+   */
+  private async checkOverdueMarkets(now: Date, oneHourAgo: Date): Promise<number> {
+    // Find active markets that should have ended
+    const overdueMarkets = await this.opinionMarketRepository.find({
+      where: {
+        status: MarketStatus.ACTIVE,
+        endTime: LessThan(now),
+      },
+      relations: ['creator'],
+      order: {
+        endTime: 'ASC', // Oldest first
+      },
+    });
+
+    this.logger.log(`Found ${overdueMarkets.length} overdue markets`);
+
+    for (const market of overdueMarkets) {
+      try {
+        const overdueMinutes = Math.floor((now.getTime() - market.endTime.getTime()) / (1000 * 60));
+        const isUrgent = market.endTime < oneHourAgo; // Over 1 hour overdue
+
+        this.logger.warn(
+          `Market "${market.title}" is ${overdueMinutes} minutes overdue ${isUrgent ? '(URGENT)' : ''}`
+        );
+
+        // Send urgent alert to admin if >60 minutes overdue
+        if (isUrgent) {
+          await this.notificationQueue.add(
+            JOB_TYPES.NOTIFICATION.SEND_WEBHOOK,
+            {
+              type: 'webhook',
+              recipient: process.env.ALERT_WEBHOOK_URL || 'http://localhost:3000/alerts',
+              subject: `🚨 URGENT: Market Resolution Overdue - ${market.title}`,
+              data: {
+                urgency: 'critical',
+                marketId: market.id,
+                marketTitle: market.title,
+                creatorHandle: market.creator?.twitterHandle,
+                endTime: market.endTime,
+                overdueMinutes,
+                totalTrades: market.totalTrades,
+                volume: market.volume,
+                message: `This market has been pending resolution for ${overdueMinutes} minutes. Immediate action required.`,
+              },
+            },
+            {
+              priority: 0, // Highest priority
+              delay: 500,
+            },
+          );
+        } else {
+          // Regular reminder for markets overdue <60 minutes
+          await this.notificationQueue.add(
+            JOB_TYPES.NOTIFICATION.SEND_WEBHOOK,
+            {
+              type: 'webhook',
+              recipient: process.env.ALERT_WEBHOOK_URL || 'http://localhost:3000/alerts',
+              subject: `Market Resolution Needed: ${market.title}`,
+              data: {
+                urgency: 'normal',
+                marketId: market.id,
+                marketTitle: market.title,
+                creatorHandle: market.creator?.twitterHandle,
+                endTime: market.endTime,
+                overdueMinutes,
+                totalTrades: market.totalTrades,
+                volume: market.volume,
+              },
+            },
+            {
+              priority: 2,
+              delay: 1000,
+            },
+          );
+        }
+
+      } catch (error) {
+        this.logger.error(`Failed to process overdue market ${market.id}: ${error.message}`);
+      }
+    }
+
+    return overdueMarkets.length;
+  }
+
+  /**
+   * Check for markets with suspicious activity
+   */
+  private async checkSuspiciousActivity(now: Date): Promise<number> {
+    // Get all active markets
+    const activeMarkets = await this.opinionMarketRepository.find({
+      where: {
+        status: MarketStatus.ACTIVE,
+      },
+      relations: ['creator'],
+    });
+
+    let suspiciousCount = 0;
+
+    for (const market of activeMarkets) {
+      try {
+        // Check for volume spikes in last 15 minutes
+        const recentVolumeStart = new Date(now.getTime() - (this.VOLUME_LOOKBACK_MINUTES * 60 * 1000));
+
+        const recentTrades = await this.marketTradeRepository
+          .createQueryBuilder('trade')
+          .select('SUM(trade.amount)', 'totalVolume')
+          .addSelect('COUNT(*)', 'tradeCount')
+          .where('trade.marketId = :marketId', { marketId: market.id })
+          .andWhere('trade.createdAt >= :startTime', { startTime: recentVolumeStart })
+          .getRawOne();
+
+        const recentVolume = Number(recentTrades?.totalVolume || 0);
+        const recentTradeCount = Number(recentTrades?.tradeCount || 0);
+
+        // Calculate average volume per 15-minute period
+        const marketAgeMinutes = (now.getTime() - market.createdAt.getTime()) / (1000 * 60);
+        const periods = Math.max(1, marketAgeMinutes / this.VOLUME_LOOKBACK_MINUTES);
+        const averageVolumePer15Min = market.volume / periods;
+
+        // Check if recent volume is 5x the average (suspicious spike)
+        if (recentVolume > averageVolumePer15Min * this.VOLUME_SPIKE_THRESHOLD && recentVolume > 100) {
+          suspiciousCount++;
+
+          this.logger.warn(
+            `🚨 Suspicious volume spike detected in market "${market.title}": ` +
+            `Recent: $${recentVolume.toFixed(2)} vs Average: $${averageVolumePer15Min.toFixed(2)} ` +
+            `(${(recentVolume / averageVolumePer15Min).toFixed(1)}x spike, ${recentTradeCount} trades)`
+          );
+
+          // Send alert to admin
+          await this.notificationQueue.add(
+            JOB_TYPES.NOTIFICATION.SEND_WEBHOOK,
+            {
+              type: 'webhook',
+              recipient: process.env.ALERT_WEBHOOK_URL || 'http://localhost:3000/alerts',
+              subject: `🚨 Suspicious Activity: ${market.title}`,
+              data: {
+                type: 'volume-spike',
+                marketId: market.id,
+                marketTitle: market.title,
+                creatorHandle: market.creator?.twitterHandle,
+                recentVolume,
+                averageVolume: averageVolumePer15Min,
+                spikeMultiplier: recentVolume / averageVolumePer15Min,
+                recentTradeCount,
+                lookbackMinutes: this.VOLUME_LOOKBACK_MINUTES,
+                timestamp: now.toISOString(),
+              },
+            },
+            {
+              priority: 1, // High priority
+              delay: 1000,
+            },
+          );
+        }
+
+        // Check for unusual trading patterns (many small trades in short time)
+        if (recentTradeCount > 20 && recentVolume / recentTradeCount < 10) {
+          suspiciousCount++;
+
+          this.logger.warn(
+            `🚨 Unusual trading pattern in market "${market.title}": ` +
+            `${recentTradeCount} trades with avg $${(recentVolume / recentTradeCount).toFixed(2)} in last ${this.VOLUME_LOOKBACK_MINUTES} min`
+          );
+
+          await this.notificationQueue.add(
+            JOB_TYPES.NOTIFICATION.SEND_WEBHOOK,
+            {
+              type: 'webhook',
+              recipient: process.env.ALERT_WEBHOOK_URL || 'http://localhost:3000/alerts',
+              subject: `🚨 Unusual Trading Pattern: ${market.title}`,
+              data: {
+                type: 'unusual-pattern',
+                marketId: market.id,
+                marketTitle: market.title,
+                creatorHandle: market.creator?.twitterHandle,
+                tradeCount: recentTradeCount,
+                averageTradeSize: recentVolume / recentTradeCount,
+                lookbackMinutes: this.VOLUME_LOOKBACK_MINUTES,
+                timestamp: now.toISOString(),
+              },
+            },
+            {
+              priority: 1,
+              delay: 1500,
+            },
+          );
+        }
+
+      } catch (error) {
+        this.logger.error(`Failed to check suspicious activity for market ${market.id}: ${error.message}`);
+      }
+    }
+
+    return suspiciousCount;
+  }
+
+  /**
+   * Update market statistics and probabilities
+   */
+  private async updateMarketStatistics(): Promise<number> {
+    // Get all active markets that need statistics update
+    const activeMarkets = await this.opinionMarketRepository.find({
+      where: {
+        status: MarketStatus.ACTIVE,
+      },
+    });
+
+    this.logger.log(`Updating statistics for ${activeMarkets.length} active markets`);
+
+    let updatedCount = 0;
+
+    for (const market of activeMarkets) {
+      try {
+        // Queue job to update market statistics (calculated probabilities, etc.)
+        await this.marketCheckerQueue.add(
+          JOB_TYPES.MARKET_CHECKER.UPDATE_MARKET_DATA,
+          {
+            marketId: market.id,
+            action: 'update-data',
+          },
+          {
+            priority: 3, // Low priority
+            delay: 2000,
+          },
+        );
+
+        updatedCount++;
+      } catch (error) {
+        this.logger.error(`Failed to queue statistics update for market ${market.id}: ${error.message}`);
+      }
+    }
+
+    return updatedCount;
+  }
+
+  /**
    * Manual trigger for testing
    * Can be called via API endpoint
    */
@@ -1102,5 +1559,14 @@ export class ScheduledTasksService {
   async triggerManualTwitterUpdate(): Promise<any> {
     this.logger.log('🔧 Manual Twitter data update triggered');
     return await this.updateTwitterData();
+  }
+
+  /**
+   * Manual trigger for market status check
+   * Can be called via API endpoint
+   */
+  async triggerManualMarketCheck(): Promise<any> {
+    this.logger.log('🔧 Manual market status check triggered');
+    return await this.checkMarketStatuses();
   }
 }
