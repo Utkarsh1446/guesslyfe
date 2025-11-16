@@ -23,6 +23,7 @@ import { ShareTransaction } from '../database/entities/share-transaction.entity'
 import { MarketTrade } from '../database/entities/market-trade.entity';
 import { OpinionMarket } from '../database/entities/opinion-market.entity';
 import { MarketPosition } from '../database/entities/market-position.entity';
+import { Notification } from '../database/entities/notification.entity';
 
 // Services (will be injected into processors)
 import { DividendsModule } from '../modules/dividends/dividends.module';
@@ -33,7 +34,7 @@ import { ContractsModule } from '../contracts/contracts.module';
 
 @Module({
   imports: [
-    // TypeORM for entities used in scheduled tasks
+    // TypeORM for entities used in scheduled tasks and processors
     TypeOrmModule.forFeature([
       Creator,
       DividendEpoch,
@@ -41,6 +42,7 @@ import { ContractsModule } from '../contracts/contracts.module';
       MarketTrade,
       OpinionMarket,
       MarketPosition,
+      Notification,
     ]),
 
     // Schedule module for cron jobs (already registered globally in AppModule)
