@@ -488,8 +488,8 @@ export class SharesService {
     }
 
     // Calculate statistics
-    let lowPrice = BigInt(Number.MAX_SAFE_INTEGER);
-    let highPrice = BigInt(0);
+    let lowPrice: bigint | null = null;
+    let highPrice: bigint | null = null;
     let totalVolume = BigInt(0);
     let firstPrice = BigInt(0);
     let lastPrice = BigInt(0);
@@ -497,8 +497,8 @@ export class SharesService {
     if (transactions.length > 0) {
       for (const tx of transactions) {
         const price = BigInt(tx.pricePerShare || 0);
-        if (price < lowPrice) lowPrice = price;
-        if (price > highPrice) highPrice = price;
+        if (lowPrice === null || price < lowPrice) lowPrice = price;
+        if (highPrice === null || price > highPrice) highPrice = price;
         totalVolume += BigInt(tx.totalAmount);
       }
       firstPrice = BigInt(transactions[0].pricePerShare || 0);
@@ -519,8 +519,8 @@ export class SharesService {
       timeframe,
       data: dataPoints,
       currentPrice,
-      lowPrice: lowPrice === BigInt(Number.MAX_SAFE_INTEGER) ? '0' : this.formatUSDC(lowPrice),
-      highPrice: this.formatUSDC(highPrice),
+      lowPrice: lowPrice !== null ? this.formatUSDC(lowPrice) : '0',
+      highPrice: highPrice !== null ? this.formatUSDC(highPrice) : '0',
       totalVolume: this.formatUSDC(totalVolume),
       priceChange,
     });

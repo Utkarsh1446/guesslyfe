@@ -109,8 +109,9 @@ export class OpinionMarketService {
     try {
       const marketInfo = await this.getMarketInfo(marketId);
 
-      const yesShares = Number(marketInfo.yesShares);
-      const noShares = Number(marketInfo.noShares);
+      // Keep as BigInt for precision, convert only when displaying
+      const yesShares = marketInfo.yesShares;
+      const noShares = marketInfo.noShares;
 
       // AMM probability calculation: P(YES) = NO_shares / (YES_shares + NO_shares)
       const totalShares = yesShares + noShares;
@@ -118,9 +119,11 @@ export class OpinionMarketService {
       let yesProbability = 0;
       let noProbability = 0;
 
-      if (totalShares > 0) {
-        yesProbability = (noShares / totalShares) * 100;
-        noProbability = (yesShares / totalShares) * 100;
+      if (totalShares > BigInt(0)) {
+        // Calculate as percentages using BigInt to maintain precision
+        // Multiply by 10000 to get 2 decimal places, then divide by 100
+        yesProbability = Number((noShares * BigInt(10000)) / totalShares) / 100;
+        noProbability = Number((yesShares * BigInt(10000)) / totalShares) / 100;
       } else {
         // Default to 50/50 if no shares exist
         yesProbability = 50;
