@@ -33,11 +33,29 @@ import {
   ShareholderDto,
   CreatorMarketDto,
 } from './dto/creator-response.dto';
+import { CheckEligibilityDto, EligibilityResponseDto } from './dto/check-eligibility.dto';
+import { VolumeProgressResponseDto } from './dto/volume-progress.dto';
+import { CreateSharesResponseDto } from './dto/create-shares.dto';
+import { PerformanceResponseDto } from './dto/performance.dto';
 
 @ApiTags('Creators')
 @Controller('creators')
 export class CreatorsController {
   constructor(private readonly creatorsService: CreatorsService) {}
+
+  /**
+   * Check Twitter eligibility to become a creator
+   */
+  @Post('check-eligibility')
+  @ApiOperation({ summary: 'Check if a Twitter account is eligible to become a creator' })
+  @ApiResponse({ status: 200, description: 'Eligibility check result', type: EligibilityResponseDto })
+  @ApiResponse({ status: 400, description: 'Invalid Twitter handle' })
+  @ApiResponse({ status: 404, description: 'Twitter account not found' })
+  async checkEligibility(
+    @Body() checkDto: CheckEligibilityDto,
+  ): Promise<EligibilityResponseDto> {
+    return this.creatorsService.checkTwitterEligibility(checkDto.twitterHandle);
+  }
 
   /**
    * Apply to become a creator
@@ -219,5 +237,51 @@ export class CreatorsController {
     @Query('offset', new DefaultValuePipe(0), ParseIntPipe) offset: number = 0,
   ): Promise<CreatorMarketDto[]> {
     return this.creatorsService.getCreatorMarkets(address, status, limit, offset);
+  }
+
+  /**
+   * Get creator volume progress toward share unlock
+   */
+  @Get('address/:address/volume-progress')
+  @UseGuards(OptionalAuthGuard)
+  @ApiOperation({ summary: 'Get creator volume progress toward $30K threshold for share unlock' })
+  @ApiParam({ name: 'address', description: 'Creator wallet address' })
+  @ApiResponse({ status: 200, description: 'Volume progress information', type: VolumeProgressResponseDto })
+  @ApiResponse({ status: 404, description: 'Creator not found' })
+  async getVolumeProgress(@Param('address') address: string): Promise<VolumeProgressResponseDto> {
+    return this.creatorsService.getVolumeProgress(address);
+  }
+
+  /**
+   * Create share contract for creator (creator only)
+   */
+  @Post('address/:address/create-shares')
+  @UseGuards(CreatorAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({ summary: 'Create share contract for creator (creator only, requires $30K volume)' })
+  @ApiParam({ name: 'address', description: 'Creator wallet address' })
+  @ApiResponse({ status: 201, description: 'Share contract created', type: CreateSharesResponseDto })
+  @ApiResponse({ status: 400, description: 'Shares not unlocked or already created' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  @ApiResponse({ status: 403, description: 'Not the creator or insufficient volume' })
+  @ApiResponse({ status: 404, description: 'Creator not found' })
+  async createShares(
+    @CurrentUser() session: Session,
+    @Param('address') address: string,
+  ): Promise<CreateSharesResponseDto> {
+    return this.creatorsService.createShares(session.userId, address);
+  }
+
+  /**
+   * Get creator performance metrics
+   */
+  @Get('address/:address/performance')
+  @UseGuards(OptionalAuthGuard)
+  @ApiOperation({ summary: 'Get creator performance metrics and statistics' })
+  @ApiParam({ name: 'address', description: 'Creator wallet address' })
+  @ApiResponse({ status: 200, description: 'Creator performance metrics', type: PerformanceResponseDto })
+  @ApiResponse({ status: 404, description: 'Creator not found' })
+  async getPerformance(@Param('address') address: string): Promise<PerformanceResponseDto> {
+    return this.creatorsService.getPerformance(address);
   }
 }

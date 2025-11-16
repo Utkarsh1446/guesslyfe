@@ -17,6 +17,10 @@ import {
   ShareholderDto,
   CreatorMarketDto,
 } from './dto/creator-response.dto';
+import { EligibilityResponseDto } from './dto/check-eligibility.dto';
+import { VolumeProgressResponseDto } from './dto/volume-progress.dto';
+import { CreateSharesResponseDto } from './dto/create-shares.dto';
+import { PerformanceResponseDto } from './dto/performance.dto';
 
 @Injectable()
 export class CreatorsService {
@@ -425,6 +429,294 @@ export class CreatorsService {
     }
 
     return marketDtos;
+  }
+
+  /**
+   * Check Twitter eligibility to become a creator
+   */
+  async checkTwitterEligibility(twitterHandle: string): Promise<EligibilityResponseDto> {
+    // Remove @ if present
+    const cleanHandle = twitterHandle.replace(/^@/, '');
+
+    // Try to find user in database first
+    const user = await this.userRepository.findOne({
+      where: { twitterHandle: cleanHandle },
+      relations: ['creator'],
+    });
+
+    if (!user) {
+      throw new NotFoundException(`Twitter account @${cleanHandle} not found in our system`);
+    }
+
+    // Check if already a creator
+    if (user.creator) {
+      return {
+        eligible: false,
+        tier: null,
+        requirements: {
+          minFollowers: 1000,
+          minAge: 90,
+          verified: false,
+        },
+        current: {
+          followers: user.twitterFollowers || 0,
+          accountAge: 0,
+          verified: false,
+        },
+        reason: 'User is already a creator',
+      };
+    }
+
+    // Determine tier based on followers
+    let tier: 'BASIC' | 'PREMIUM' | 'ELITE' | null = null;
+    const followers = user.twitterFollowers || 0;
+
+    if (followers >= 100000) {
+      tier = 'ELITE';
+    } else if (followers >= 10000) {
+      tier = 'PREMIUM';
+    } else if (followers >= 1000) {
+      tier = 'BASIC';
+    }
+
+    const eligible = followers >= 1000;
+
+    return {
+      eligible,
+      tier,
+      requirements: {
+        minFollowers: 1000,
+        minAge: 90,
+        verified: false,
+      },
+      current: {
+        followers,
+        accountAge: 0,
+        verified: false,
+      },
+      reason: eligible ? undefined : 'Minimum 1000 followers required',
+    };
+  }
+
+  /**
+   * Get volume progress toward share unlock
+   */
+  async getVolumeProgress(creatorAddress: string): Promise<VolumeProgressResponseDto> {
+    const creator = await this.creatorRepository.findOne({
+      where: { creatorAddress: creatorAddress.toLowerCase() },
+    });
+
+    if (!creator) {
+      throw new NotFoundException(`Creator with address ${creatorAddress} not found`);
+    }
+
+    // Get volume info from blockchain
+    const volumeInfo = await this.creatorShareFactoryService.getVolumeInfo(creatorAddress);
+
+    // Get all markets for this creator
+    const markets = await this.opinionMarketRepository.find({
+      where: { creatorAddress: creatorAddress.toLowerCase() },
+      order: { createdAt: 'DESC' },
+    });
+
+    // Calculate volume per market
+    const marketVolumes = await Promise.all(
+      markets.map(async (market) => {
+        const totalVolume = await this.marketTradeRepository
+          .createQueryBuilder('trade')
+          .select('SUM(trade.amount)', 'total')
+          .where('trade.opinionMarketMarketId = :marketId', { marketId: market.marketId })
+          .getRawOne();
+
+        return {
+          marketId: market.marketId.toString(),
+          question: market.question,
+          volume: this.formatUSDC(BigInt(totalVolume.total || '0')),
+        };
+      }),
+    );
+
+    const currentVolume = BigInt(volumeInfo.currentVolume);
+    const threshold = BigInt(volumeInfo.threshold);
+    const remaining = threshold > currentVolume ? threshold - currentVolume : BigInt(0);
+    const progress = threshold > BigInt(0)
+      ? Math.min(100, Number((currentVolume * BigInt(10000)) / threshold) / 100)
+      : 0;
+
+    return {
+      creatorAddress,
+      totalVolume: volumeInfo.currentVolumeFormatted,
+      threshold: volumeInfo.thresholdFormatted,
+      progress,
+      remaining: this.formatUSDC(remaining),
+      sharesUnlocked: volumeInfo.isUnlocked,
+      markets: marketVolumes,
+      totalMarkets: markets.length,
+    };
+  }
+
+  /**
+   * Create share contract for creator
+   */
+  async createShares(userId: string, creatorAddress: string): Promise<CreateSharesResponseDto> {
+    // Verify user is the creator
+    const creator = await this.creatorRepository.findOne({
+      where: { creatorAddress: creatorAddress.toLowerCase() },
+      relations: ['user'],
+    });
+
+    if (!creator) {
+      throw new NotFoundException(`Creator with address ${creatorAddress} not found`);
+    }
+
+    if (creator.user.id !== userId) {
+      throw new ForbiddenException('Only the creator can create their share contract');
+    }
+
+    // Check if shares already created
+    const existingContract = await this.creatorShareFactoryService.getShareContract(creatorAddress);
+    if (existingContract) {
+      throw new BadRequestException('Share contract already exists');
+    }
+
+    // Check if shares are unlocked
+    const volumeInfo = await this.creatorShareFactoryService.getVolumeInfo(creatorAddress);
+    if (!volumeInfo.isUnlocked) {
+      throw new ForbiddenException(
+        `Shares not unlocked. Current volume: ${volumeInfo.currentVolumeFormatted}, Required: ${volumeInfo.thresholdFormatted}`,
+      );
+    }
+
+    // Deploy share contract via factory
+    try {
+      const result = await this.creatorShareFactoryService.createCreatorShares(creatorAddress);
+
+      return {
+        shareContractAddress: result.shareContractAddress,
+        txHash: result.transactionHash,
+        creatorAddress,
+        blockNumber: result.blockNumber,
+        success: true,
+        message: 'Share contract successfully deployed',
+      };
+    } catch (error) {
+      throw new BadRequestException(`Failed to create share contract: ${error.message}`);
+    }
+  }
+
+  /**
+   * Get creator performance metrics
+   */
+  async getPerformance(creatorAddress: string): Promise<PerformanceResponseDto> {
+    const creator = await this.creatorRepository.findOne({
+      where: { creatorAddress: creatorAddress.toLowerCase() },
+    });
+
+    if (!creator) {
+      throw new NotFoundException(`Creator with address ${creatorAddress} not found`);
+    }
+
+    // Get all markets
+    const markets = await this.opinionMarketRepository.find({
+      where: { creatorAddress: creatorAddress.toLowerCase() },
+    });
+
+    const marketsCreated = markets.length;
+    let marketsResolved = 0;
+    let correctResolutions = 0;
+    let totalVolume = BigInt(0);
+    let totalParticipantsSet = new Set<string>();
+
+    // Analyze each market
+    for (const market of markets) {
+      const marketInfo = await this.opinionMarketService.getMarketInfo(BigInt(market.marketId));
+
+      if (marketInfo.resolved) {
+        marketsResolved++;
+        // For now, assume all resolutions are correct (would need dispute tracking for accuracy)
+        correctResolutions++;
+      }
+
+      // Calculate market volume
+      const volumeResult = await this.marketTradeRepository
+        .createQueryBuilder('trade')
+        .select('SUM(trade.amount)', 'total')
+        .where('trade.opinionMarketMarketId = :marketId', { marketId: market.marketId })
+        .getRawOne();
+
+      totalVolume += BigInt(volumeResult.total || '0');
+
+      // Count unique participants
+      const participants = await this.marketTradeRepository.find({
+        where: { opinionMarket: { marketId: market.marketId } },
+        select: ['userAddress'],
+      });
+
+      participants.forEach(p => totalParticipantsSet.add(p.userAddress.toLowerCase()));
+    }
+
+    const resolutionAccuracy = marketsResolved > 0
+      ? (correctResolutions / marketsResolved) * 100
+      : 0;
+
+    const avgMarketVolume = marketsCreated > 0
+      ? totalVolume / BigInt(marketsCreated)
+      : BigInt(0);
+
+    // Calculate revenue (creator fees from markets and shares)
+    let marketFeeRevenue = BigInt(0);
+    let shareFeeRevenue = BigInt(0);
+
+    // Market fees: 2% of total volume goes to creator
+    marketFeeRevenue = (totalVolume * BigInt(200)) / BigInt(10000); // 2% of volume
+
+    // Share fees: Get all share transactions
+    const shareTransactions = await this.shareTransactionRepository.find({
+      where: { creatorShare: { creatorAddress: creatorAddress.toLowerCase() } },
+    });
+
+    for (const tx of shareTransactions) {
+      shareFeeRevenue += BigInt(tx.creatorFee);
+    }
+
+    const totalRevenue = marketFeeRevenue + shareFeeRevenue;
+
+    // Get share holder info if shares exist
+    let shareHolders = 0;
+    let totalSharesIssued = '0';
+
+    try {
+      const shareContract = await this.creatorShareFactoryService.getShareContract(creatorAddress);
+      if (shareContract) {
+        const supply = await this.creatorShareService.getCurrentSupply(creatorAddress);
+        totalSharesIssued = supply.supplyFormatted;
+
+        const shareholderCount = await this.shareTransactionRepository
+          .createQueryBuilder('tx')
+          .select('COUNT(DISTINCT tx.buyer)', 'count')
+          .where('tx.creatorShareCreatorAddress = :address', { address: creatorAddress.toLowerCase() })
+          .getRawOne();
+
+        shareHolders = parseInt(shareholderCount.count) || 0;
+      }
+    } catch (error) {
+      // Shares might not be created yet
+    }
+
+    return {
+      creatorAddress,
+      totalVolume: this.formatUSDC(totalVolume),
+      marketsCreated,
+      marketsResolved,
+      resolutionAccuracy,
+      totalRevenue: this.formatUSDC(totalRevenue),
+      marketFeeRevenue: this.formatUSDC(marketFeeRevenue),
+      shareFeeRevenue: this.formatUSDC(shareFeeRevenue),
+      totalParticipants: totalParticipantsSet.size,
+      avgMarketVolume: this.formatUSDC(avgMarketVolume),
+      shareHolders,
+      totalSharesIssued,
+    };
   }
 
   /**
