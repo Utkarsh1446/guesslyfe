@@ -1,5 +1,7 @@
 import { Module } from '@nestjs/common';
 import { BullModule } from '@nestjs/bull';
+import { TypeOrmModule } from '@nestjs/typeorm';
+import { ScheduleModule } from '@nestjs/schedule';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { QUEUE_NAMES, JOB_CONFIG } from './queue.constants';
 
@@ -11,6 +13,15 @@ import { VolumeTrackerProcessor } from './processors/volume-tracker.processor';
 import { MarketCheckerProcessor } from './processors/market-checker.processor';
 import { NotificationProcessor } from './processors/notification.processor';
 
+// Scheduled Tasks
+import { ScheduledTasksService } from './scheduled-tasks.service';
+
+// Entities
+import { Creator } from '../database/entities/creator.entity';
+import { DividendEpoch } from '../database/entities/dividend-epoch.entity';
+import { ShareTransaction } from '../database/entities/share-transaction.entity';
+import { MarketTrade } from '../database/entities/market-trade.entity';
+
 // Services (will be injected into processors)
 import { DividendsModule } from '../modules/dividends/dividends.module';
 import { TwitterModule } from '../modules/twitter/twitter.module';
@@ -19,6 +30,17 @@ import { CreatorsModule } from '../modules/creators/creators.module';
 
 @Module({
   imports: [
+    // TypeORM for entities used in scheduled tasks
+    TypeOrmModule.forFeature([
+      Creator,
+      DividendEpoch,
+      ShareTransaction,
+      MarketTrade,
+    ]),
+
+    // Schedule module for cron jobs (already registered globally in AppModule)
+    ScheduleModule,
+
     // Register all queues (BullModule.forRoot is already configured in AppModule)
     BullModule.registerQueue(
       {
@@ -78,12 +100,16 @@ import { CreatorsModule } from '../modules/creators/creators.module';
     CreatorsModule,
   ],
   providers: [
+    // Job Processors
     EpochFinalizerProcessor,
     DividendCalculatorProcessor,
     TwitterScraperProcessor,
     VolumeTrackerProcessor,
     MarketCheckerProcessor,
     NotificationProcessor,
+
+    // Scheduled Tasks (Cron Jobs)
+    ScheduledTasksService,
   ],
   exports: [BullModule],
 })

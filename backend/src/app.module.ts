@@ -4,6 +4,7 @@ import { TypeOrmModule, TypeOrmModuleOptions } from '@nestjs/typeorm';
 import { BullModule } from '@nestjs/bull';
 import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
 import { EventEmitterModule } from '@nestjs/event-emitter';
+import { ScheduleModule } from '@nestjs/schedule';
 import { RedisModule } from '@nestjs-modules/ioredis';
 import { APP_GUARD } from '@nestjs/core';
 import { AppController } from './app.controller';
@@ -93,6 +94,9 @@ import twitterConfig from './config/twitter.config';
 
     // Event Emitter Module (for blockchain events)
     EventEmitterModule.forRoot(),
+
+    // Schedule Module (for cron jobs)
+    ScheduleModule.forRoot(),
 
     // Feature Modules
     HealthModule,
