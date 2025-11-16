@@ -17,6 +17,7 @@ import { MarketsModule } from './modules/markets/markets.module';
 import { DividendsModule } from './modules/dividends/dividends.module';
 import { TwitterModule } from './modules/twitter/twitter.module';
 import { ContractsModule } from './contracts/contracts.module';
+import { QueuesModule } from './jobs/queues.module';
 
 // Configuration imports
 import appConfig from './config/app.config';
@@ -103,6 +104,9 @@ import twitterConfig from './config/twitter.config';
     DividendsModule,
     TwitterModule,
     ContractsModule,
+
+    // Background Jobs
+    QueuesModule,
   ],
   controllers: [AppController],
   providers: [

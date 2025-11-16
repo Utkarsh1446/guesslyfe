@@ -6,12 +6,19 @@ import { NestFactory } from '@nestjs/core';
 import { ValidationPipe, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
+import { getQueueToken } from '@nestjs/bull';
+// Bull Board imports - Install packages: npm install @bull-board/api @bull-board/express
+// import { ExpressAdapter } from '@bull-board/express';
+// import { BullAdapter } from '@bull-board/api/bullAdapter';
+// import { createBullBoard } from '@bull-board/api';
 import helmet from 'helmet';
 import compression from 'compression';
 import cookieParser from 'cookie-parser';
 import { AppModule } from './app.module';
 import { AllExceptionsFilter } from './common/filters/http-exception.filter';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
+import { QUEUE_NAMES } from './jobs/queue.constants';
+import { adminAuthMiddleware } from './jobs/guards/admin-auth.guard';
 
 async function bootstrap() {
   const logger = new Logger('Bootstrap');
@@ -87,6 +94,41 @@ async function bootstrap() {
 
     logger.log(`Swagger documentation available at: http://localhost:${configService.get<number>('app.port')}/docs`);
   }
+
+  // Bull Board - Queue Monitoring Dashboard
+  // Uncomment after installing: npm install @bull-board/api @bull-board/express
+  /*
+  try {
+    const serverAdapter = new ExpressAdapter();
+    serverAdapter.setBasePath('/admin/queues');
+
+    // Get all queue instances
+    const queues = Object.values(QUEUE_NAMES).map((queueName) => {
+      try {
+        return app.get(getQueueToken(queueName));
+      } catch (error) {
+        logger.warn(`Queue ${queueName} not found, skipping...`);
+        return null;
+      }
+    }).filter(queue => queue !== null);
+
+    // Create Bull Board with all queues
+    createBullBoard({
+      queues: queues.map(queue => new BullAdapter(queue)),
+      serverAdapter,
+    });
+
+    // Mount Bull Board with admin authentication
+    const expressApp = app.getHttpAdapter().getInstance();
+    expressApp.use('/admin/queues', adminAuthMiddleware, serverAdapter.getRouter());
+
+    logger.log(`Bull Board available at: http://localhost:${configService.get<number>('app.port')}/admin/queues`);
+    logger.log(`  Username: ${configService.get<string>('ADMIN_USERNAME', 'admin')}`);
+    logger.log(`  Password: ${configService.get<string>('ADMIN_PASSWORD') ? '***' : 'NOT SET - ACCESS DENIED'}`);
+  } catch (error) {
+    logger.error(`Failed to setup Bull Board: ${error.message}`);
+  }
+  */
 
   // Start Server
   const port = configService.get<number>('app.port') || 3000;
