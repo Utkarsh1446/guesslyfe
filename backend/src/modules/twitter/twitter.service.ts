@@ -1,234 +1,302 @@
-import { Injectable, NotFoundException, BadRequestException, Logger } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, Logger, Inject } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { ConfigService } from '@nestjs/config';
+import { CACHE_MANAGER } from '@nestjs/cache-manager';
+import { Cache } from 'cache-manager';
 import { Creator } from '../../database/entities/creator.entity';
 import { User } from '../../database/entities/user.entity';
 import { TwitterUserDto, TwitterMetricsDto, SyncResultDto } from './dto/twitter-response.dto';
+import { TwitterAPIService, TweetVerification } from './twitter-api.service';
+import { TwitterScraperService } from './twitter-scraper.service';
 
-interface TwitterAPIUserResponse {
-  data: {
-    id: string;
-    username: string;
-    name: string;
-    description?: string;
-    profile_image_url: string;
-    verified: boolean;
-    public_metrics: {
-      followers_count: number;
-      following_count: number;
-      tweet_count: number;
-    };
-    created_at: string;
-  };
-}
-
-interface TwitterAPITweetsResponse {
-  data?: Array<{
-    id: string;
-    text: string;
-    public_metrics: {
-      like_count: number;
-      retweet_count: number;
-      reply_count: number;
-      quote_count: number;
-    };
-  }>;
-}
-
-interface TwitterAPITweetResponse {
-  data: {
-    id: string;
-    text: string;
-    author_id: string;
-    created_at: string;
-    entities?: {
-      mentions?: Array<{
-        start: number;
-        end: number;
-        username: string;
-      }>;
-    };
-  };
-  includes?: {
-    users?: Array<{
-      id: string;
-      username: string;
-      name: string;
-    }>;
-  };
-}
-
-export interface TweetVerification {
-  tweetId: string;
-  authorId: string;
-  authorUsername: string;
-  text: string;
-  mentions: string[];
-  createdAt: Date;
-  isValid: boolean;
-  errors: string[];
-}
+export { TweetVerification } from './twitter-api.service';
 
 @Injectable()
 export class TwitterService {
   private readonly logger = new Logger(TwitterService.name);
-  private readonly bearerToken: string;
-  private readonly API_BASE_URL = 'https://api.twitter.com/2';
+  private readonly CACHE_TTL = 15 * 60 * 1000; // 15 minutes
 
   constructor(
     @InjectRepository(Creator)
     private readonly creatorRepository: Repository<Creator>,
     @InjectRepository(User)
     private readonly userRepository: Repository<User>,
-    private readonly configService: ConfigService,
-  ) {
-    this.bearerToken = this.configService.get<string>('twitter.bearerToken') || '';
-
-    if (!this.bearerToken) {
-      this.logger.warn('Twitter Bearer Token not configured. Twitter API features will be disabled.');
-    }
-  }
+    private readonly twitterAPI: TwitterAPIService,
+    private readonly twitterScraper: TwitterScraperService,
+    @Inject(CACHE_MANAGER)
+    private readonly cacheManager: Cache,
+  ) {}
 
   /**
-   * Get Twitter user profile by handle
+   * Get user by username
+   * Uses API for basic info, Puppeteer for engagement
    */
-  async getUserByHandle(handle: string): Promise<TwitterUserDto> {
-    if (!this.bearerToken) {
-      throw new BadRequestException('Twitter API not configured');
+  async getUserByUsername(username: string): Promise<TwitterUserDto> {
+    const cleanUsername = username.startsWith('@') ? username.slice(1) : username;
+    const cacheKey = `twitter:user:${cleanUsername}`;
+
+    // Check cache
+    const cached = await this.cacheManager.get<TwitterUserDto>(cacheKey);
+    if (cached) {
+      this.logger.debug(`Cache hit for user @${cleanUsername}`);
+      return cached;
     }
 
+    this.logger.log(`Fetching data for @${cleanUsername}`);
+
     try {
-      const cleanHandle = handle.startsWith('@') ? handle.slice(1) : handle;
+      // Get basic info from API (OAuth data)
+      const apiUser = await this.twitterAPI.getUserByUsername(cleanUsername);
 
-      const response = await fetch(
-        `${this.API_BASE_URL}/users/by/username/${cleanHandle}?user.fields=description,profile_image_url,verified,public_metrics,created_at`,
-        {
-          headers: {
-            Authorization: `Bearer ${this.bearerToken}`,
-          },
-        },
-      );
-
-      if (!response.ok) {
-        if (response.status === 404) {
-          throw new NotFoundException(`Twitter user @${cleanHandle} not found`);
-        }
-        throw new Error(`Twitter API error: ${response.statusText}`);
+      // Get engagement data from Puppeteer scraping
+      let scrapedData: any = null;
+      try {
+        scrapedData = await this.twitterScraper.scrapeUserEngagement(cleanUsername);
+      } catch (error) {
+        this.logger.warn(`Failed to scrape engagement for @${cleanUsername}, using API data only`);
       }
-
-      const data: TwitterAPIUserResponse = await response.json();
 
       // Check if user is a creator on our platform
       const user = await this.userRepository.findOne({
-        where: { twitterId: data.data.id },
+        where: { twitterId: apiUser.id },
         relations: ['creator'],
       });
 
-      return new TwitterUserDto({
-        id: data.data.id,
-        username: data.data.username,
-        name: data.data.name,
-        description: data.data.description,
-        profileImageUrl: data.data.profile_image_url,
-        verified: data.data.verified || false,
-        followersCount: data.data.public_metrics.followers_count,
-        followingCount: data.data.public_metrics.following_count,
-        tweetCount: data.data.public_metrics.tweet_count,
-        createdAt: new Date(data.data.created_at),
+      const result = new TwitterUserDto({
+        id: apiUser.id,
+        username: apiUser.username,
+        name: apiUser.name,
+        description: apiUser.description,
+        profileImageUrl: apiUser.profile_image_url,
+        verified: apiUser.verified || false,
+        // Use scraped data if available, otherwise use API
+        followersCount: scrapedData?.followerCount || apiUser.public_metrics.followers_count,
+        followingCount: scrapedData?.followingCount || apiUser.public_metrics.following_count,
+        tweetCount: apiUser.public_metrics.tweet_count, // Always from API (more reliable)
+        createdAt: new Date(apiUser.created_at),
         isCreator: !!user?.creator,
         creatorAddress: user?.creator?.creatorAddress,
       });
+
+      // Cache for 15 minutes
+      await this.cacheManager.set(cacheKey, result, this.CACHE_TTL);
+
+      return result;
     } catch (error) {
-      this.logger.error(`Failed to fetch Twitter user @${handle}:`, error.message);
+      this.logger.error(`Failed to fetch Twitter user @${cleanUsername}:`, error.message);
       throw error;
     }
   }
 
   /**
-   * Get Twitter metrics for a user
+   * Get user tweets
    */
-  async getUserMetrics(handle: string): Promise<TwitterMetricsDto> {
-    if (!this.bearerToken) {
-      throw new BadRequestException('Twitter API not configured');
+  async getUserTweets(
+    userId: string,
+    params: {
+      maxResults?: number;
+      startTime?: Date;
+    } = {},
+  ) {
+    const cacheKey = `twitter:tweets:${userId}:${params.maxResults || 100}`;
+
+    // Check cache
+    const cached = await this.cacheManager.get(cacheKey);
+    if (cached) {
+      this.logger.debug(`Cache hit for tweets of user ${userId}`);
+      return cached;
     }
 
     try {
-      const cleanHandle = handle.startsWith('@') ? handle.slice(1) : handle;
+      const tweets = await this.twitterAPI.getUserTweets(userId, params);
 
-      // Get user profile first
-      const userResponse = await fetch(
-        `${this.API_BASE_URL}/users/by/username/${cleanHandle}?user.fields=public_metrics`,
-        {
-          headers: {
-            Authorization: `Bearer ${this.bearerToken}`,
-          },
-        },
-      );
+      // Cache for 15 minutes
+      await this.cacheManager.set(cacheKey, tweets, this.CACHE_TTL);
 
-      if (!userResponse.ok) {
-        throw new NotFoundException(`Twitter user @${cleanHandle} not found`);
+      return tweets;
+    } catch (error) {
+      this.logger.error(`Failed to fetch tweets for user ${userId}:`, error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Calculate engagement rate
+   * Uses Puppeteer scraping for more accurate engagement metrics
+   */
+  async calculateEngagementRate(userId: string, username: string): Promise<number> {
+    const cacheKey = `twitter:engagement:${userId}`;
+
+    // Check cache
+    const cached = await this.cacheManager.get<number>(cacheKey);
+    if (cached !== null && cached !== undefined) {
+      this.logger.debug(`Cache hit for engagement rate of ${username}`);
+      return cached;
+    }
+
+    try {
+      // Try scraping first (more accurate for engagement)
+      try {
+        const scrapedData = await this.twitterScraper.scrapeUserEngagement(username);
+        const engagementRate = scrapedData.engagementRate;
+
+        // Cache for 15 minutes
+        await this.cacheManager.set(cacheKey, engagementRate, this.CACHE_TTL);
+
+        return engagementRate;
+      } catch (scrapError) {
+        this.logger.warn(`Scraping failed for @${username}, falling back to API`);
+
+        // Fallback to API calculation
+        const apiUser = await this.twitterAPI.getUserByUsername(username);
+        const engagementRate = await this.twitterAPI.calculateEngagementRate(
+          userId,
+          apiUser.public_metrics.followers_count,
+        );
+
+        // Cache for 15 minutes
+        await this.cacheManager.set(cacheKey, engagementRate, this.CACHE_TTL);
+
+        return engagementRate;
+      }
+    } catch (error) {
+      this.logger.error(`Failed to calculate engagement rate for ${username}:`, error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Verify a tweet
+   * Checks tweet exists, author, and required mentions
+   */
+  async verifyTweet(
+    tweetUrl: string,
+    expectedAuthorId: string,
+    requiredCreatorHandles: string[] = [],
+  ): Promise<TweetVerification> {
+    try {
+      // Add @guesslydotfun to required mentions
+      const allRequiredMentions = ['@guesslydotfun', ...requiredCreatorHandles];
+
+      const verification = await this.twitterAPI.verifyTweet(tweetUrl, expectedAuthorId, []);
+
+      if (!verification.isValid) {
+        return verification;
       }
 
-      const userData: TwitterAPIUserResponse = await userResponse.json();
-      const userId = userData.data.id;
+      // Additional checks for our use case
+      const errors: string[] = [];
 
-      // Get recent tweets to calculate engagement
-      const tweetsResponse = await fetch(
-        `${this.API_BASE_URL}/users/${userId}/tweets?max_results=10&tweet.fields=public_metrics`,
-        {
-          headers: {
-            Authorization: `Bearer ${this.bearerToken}`,
-          },
-        },
-      );
+      // Check for @guesslydotfun mention
+      if (!verification.mentions.includes('guesslydotfun')) {
+        errors.push('Tweet must mention @guesslydotfun');
+      }
 
-      let avgLikes = 0;
-      let avgRetweets = 0;
-      let avgReplies = 0;
-      let engagementRate = 0;
+      // Check for creator mentions
+      if (requiredCreatorHandles.length > 0) {
+        const creatorHandlesLower = requiredCreatorHandles.map((h) =>
+          h.toLowerCase().replace('@', ''),
+        );
+        const hasCreatorMention = creatorHandlesLower.some((handle) =>
+          verification.mentions.includes(handle),
+        );
 
-      if (tweetsResponse.ok) {
-        const tweetsData: TwitterAPITweetsResponse = await tweetsResponse.json();
-
-        if (tweetsData.data && tweetsData.data.length > 0) {
-          const totalLikes = tweetsData.data.reduce(
-            (sum, tweet) => sum + tweet.public_metrics.like_count,
-            0,
+        if (!hasCreatorMention) {
+          errors.push(
+            `Tweet must mention at least one creator: ${requiredCreatorHandles.join(', ')}`,
           );
-          const totalRetweets = tweetsData.data.reduce(
-            (sum, tweet) => sum + tweet.public_metrics.retweet_count,
-            0,
-          );
-          const totalReplies = tweetsData.data.reduce(
-            (sum, tweet) => sum + tweet.public_metrics.reply_count,
-            0,
-          );
-
-          avgLikes = totalLikes / tweetsData.data.length;
-          avgRetweets = totalRetweets / tweetsData.data.length;
-          avgReplies = totalReplies / tweetsData.data.length;
-
-          // Calculate engagement rate: (avg interactions / followers) * 100
-          const avgInteractions = avgLikes + avgRetweets + avgReplies;
-          engagementRate =
-            userData.data.public_metrics.followers_count > 0
-              ? (avgInteractions / userData.data.public_metrics.followers_count) * 100
-              : 0;
         }
       }
 
-      return new TwitterMetricsDto({
-        username: userData.data.username,
-        followersCount: userData.data.public_metrics.followers_count,
-        followingCount: userData.data.public_metrics.following_count,
-        tweetCount: userData.data.public_metrics.tweet_count,
-        engagementRate: Math.round(engagementRate * 100) / 100,
+      return {
+        ...verification,
+        isValid: errors.length === 0,
+        errors,
+      };
+    } catch (error) {
+      this.logger.error(`Failed to verify tweet:`, error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Check if a tweet was posted by a specific user
+   */
+  async checkUserTweetExists(userId: string, tweetId: string): Promise<boolean> {
+    const cacheKey = `twitter:tweet-check:${tweetId}:${userId}`;
+
+    // Check cache
+    const cached = await this.cacheManager.get<boolean>(cacheKey);
+    if (cached !== null && cached !== undefined) {
+      return cached;
+    }
+
+    try {
+      const exists = await this.twitterAPI.checkUserTweetExists(userId, tweetId);
+
+      // Cache for 15 minutes
+      await this.cacheManager.set(cacheKey, exists, this.CACHE_TTL);
+
+      return exists;
+    } catch (error) {
+      this.logger.error(`Failed to check tweet ${tweetId}:`, error.message);
+      return false;
+    }
+  }
+
+  /**
+   * Get Twitter metrics for a user
+   * Uses Puppeteer for accurate engagement data
+   */
+  async getUserMetrics(handle: string): Promise<TwitterMetricsDto> {
+    const cleanHandle = handle.startsWith('@') ? handle.slice(1) : handle;
+    const cacheKey = `twitter:metrics:${cleanHandle}`;
+
+    // Check cache
+    const cached = await this.cacheManager.get<TwitterMetricsDto>(cacheKey);
+    if (cached) {
+      this.logger.debug(`Cache hit for metrics of @${cleanHandle}`);
+      return cached;
+    }
+
+    try {
+      // Get user info
+      const user = await this.twitterAPI.getUserByUsername(cleanHandle);
+
+      // Get scraped engagement data
+      const scrapedData = await this.twitterScraper.scrapeUserEngagement(cleanHandle);
+
+      // Calculate average engagement from scraped tweets
+      let avgLikes = 0;
+      let avgRetweets = 0;
+      let avgReplies = 0;
+
+      if (scrapedData.recentTweets.length > 0) {
+        const totalLikes = scrapedData.recentTweets.reduce((sum, t) => sum + t.likes, 0);
+        const totalRetweets = scrapedData.recentTweets.reduce((sum, t) => sum + t.retweets, 0);
+        const totalReplies = scrapedData.recentTweets.reduce((sum, t) => sum + t.replies, 0);
+
+        avgLikes = totalLikes / scrapedData.recentTweets.length;
+        avgRetweets = totalRetweets / scrapedData.recentTweets.length;
+        avgReplies = totalReplies / scrapedData.recentTweets.length;
+      }
+
+      const result = new TwitterMetricsDto({
+        username: user.username,
+        followersCount: scrapedData.followerCount || user.public_metrics.followers_count,
+        followingCount: scrapedData.followingCount || user.public_metrics.following_count,
+        tweetCount: user.public_metrics.tweet_count,
+        engagementRate: scrapedData.engagementRate,
         avgLikes: Math.round(avgLikes),
         avgRetweets: Math.round(avgRetweets),
         avgReplies: Math.round(avgReplies),
         lastFetched: new Date(),
       });
+
+      // Cache for 15 minutes
+      await this.cacheManager.set(cacheKey, result, this.CACHE_TTL);
+
+      return result;
     } catch (error) {
       this.logger.error(`Failed to fetch metrics for @${handle}:`, error.message);
       throw error;
@@ -250,7 +318,7 @@ export class TwitterService {
 
     try {
       // Fetch latest Twitter data
-      const twitterData = await this.getUserByHandle(creator.user.twitterHandle);
+      const twitterData = await this.getUserByUsername(creator.user.twitterHandle);
 
       // Update user fields
       const updatedFields: string[] = [];
@@ -296,153 +364,9 @@ export class TwitterService {
   }
 
   /**
-   * Search for potential creators on Twitter
-   */
-  async searchCreators(query: string, limit: number = 10): Promise<TwitterUserDto[]> {
-    if (!this.bearerToken) {
-      throw new BadRequestException('Twitter API not configured');
-    }
-
-    try {
-      // Note: Twitter API v2 search requires different permissions
-      // For now, we'll return an empty array and log a warning
-      this.logger.warn('Twitter search requires elevated API access. Feature not fully implemented.');
-
-      return [];
-    } catch (error) {
-      this.logger.error(`Failed to search Twitter:`, error.message);
-      throw error;
-    }
-  }
-
-  /**
-   * Extract tweet ID from Twitter URL
+   * Extract tweet ID from URL
    */
   extractTweetId(tweetUrl: string): string | null {
-    // Support formats:
-    // - https://twitter.com/username/status/1234567890
-    // - https://x.com/username/status/1234567890
-    // - https://www.twitter.com/username/status/1234567890
-    const match = tweetUrl.match(/(?:twitter|x)\.com\/\w+\/status\/(\d+)/);
-    return match ? match[1] : null;
-  }
-
-  /**
-   * Verify a tweet for dividend claims
-   * Checks:
-   * 1. Tweet exists
-   * 2. Tweet is by the specified user
-   * 3. Tweet contains @guesslydotfun mention
-   * 4. Tweet mentions at least one creator
-   */
-  async verifyTweet(
-    tweetUrl: string,
-    expectedAuthorId: string,
-    requiredCreatorHandles: string[],
-  ): Promise<TweetVerification> {
-    if (!this.bearerToken) {
-      throw new BadRequestException('Twitter API not configured');
-    }
-
-    const tweetId = this.extractTweetId(tweetUrl);
-
-    if (!tweetId) {
-      return {
-        tweetId: '',
-        authorId: '',
-        authorUsername: '',
-        text: '',
-        mentions: [],
-        createdAt: new Date(),
-        isValid: false,
-        errors: ['Invalid tweet URL format'],
-      };
-    }
-
-    try {
-      const response = await fetch(
-        `${this.API_BASE_URL}/tweets/${tweetId}?tweet.fields=author_id,created_at,entities&expansions=author_id`,
-        {
-          headers: {
-            Authorization: `Bearer ${this.bearerToken}`,
-          },
-        },
-      );
-
-      if (!response.ok) {
-        if (response.status === 404) {
-          return {
-            tweetId,
-            authorId: '',
-            authorUsername: '',
-            text: '',
-            mentions: [],
-            createdAt: new Date(),
-            isValid: false,
-            errors: ['Tweet not found'],
-          };
-        }
-        throw new Error(`Twitter API error: ${response.statusText}`);
-      }
-
-      const data: TwitterAPITweetResponse = await response.json();
-      const tweet = data.data;
-      const author = data.includes?.users?.[0];
-
-      const errors: string[] = [];
-
-      // Check author matches expected user
-      if (tweet.author_id !== expectedAuthorId) {
-        errors.push('Tweet is not by the expected user');
-      }
-
-      // Extract mentions from tweet
-      const mentions = tweet.entities?.mentions?.map((m) => m.username.toLowerCase()) || [];
-
-      // Also check text for @mentions (fallback if entities not available)
-      const textMentions = tweet.text.match(/@(\w+)/g)?.map((m) => m.slice(1).toLowerCase()) || [];
-      const allMentions = [...new Set([...mentions, ...textMentions])];
-
-      // Check for @guesslydotfun mention
-      if (!allMentions.includes('guesslydotfun')) {
-        errors.push('Tweet must mention @guesslydotfun');
-      }
-
-      // Check for at least one creator mention
-      const creatorHandlesLower = requiredCreatorHandles.map((h) =>
-        h.toLowerCase().replace('@', ''),
-      );
-      const hasCreatorMention = creatorHandlesLower.some((handle) => allMentions.includes(handle));
-
-      if (!hasCreatorMention) {
-        errors.push(
-          `Tweet must mention at least one creator: ${requiredCreatorHandles.join(', ')}`,
-        );
-      }
-
-      return {
-        tweetId,
-        authorId: tweet.author_id,
-        authorUsername: author?.username || '',
-        text: tweet.text,
-        mentions: allMentions,
-        createdAt: new Date(tweet.created_at),
-        isValid: errors.length === 0,
-        errors,
-      };
-    } catch (error) {
-      this.logger.error(`Failed to verify tweet ${tweetId}:`, error.message);
-
-      return {
-        tweetId,
-        authorId: '',
-        authorUsername: '',
-        text: '',
-        mentions: [],
-        createdAt: new Date(),
-        isValid: false,
-        errors: [`Failed to fetch tweet: ${error.message}`],
-      };
-    }
+    return this.twitterAPI.extractTweetId(tweetUrl);
   }
 }
