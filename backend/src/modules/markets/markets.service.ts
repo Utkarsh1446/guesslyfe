@@ -122,11 +122,11 @@ export class MarketsService {
     // Calculate shares received using AMM formula
     // For simplicity, we'll estimate: shares ≈ betAmount / currentPrice
     const betAmountInUnits = BigInt(betAmount) * BigInt(1e6);
-    const totalShares = BigInt(marketInfo.totalYesShares) + BigInt(marketInfo.totalNoShares);
+    const totalShares = BigInt(marketInfo.yesShares) + BigInt(marketInfo.noShares);
 
     let expectedShares: bigint;
-    let newYesShares = BigInt(marketInfo.totalYesShares);
-    let newNoShares = BigInt(marketInfo.totalNoShares);
+    let newYesShares = BigInt(marketInfo.yesShares);
+    let newNoShares = BigInt(marketInfo.noShares);
 
     if (outcome === 'YES') {
       // Buying YES shares increases YES shares in the pool
@@ -204,8 +204,8 @@ export class MarketsService {
         // Market resolved
         const winningShares = marketInfo.winningOutcome ? yesShares : noShares;
         const totalWinningShares = marketInfo.winningOutcome
-          ? BigInt(marketInfo.totalYesShares)
-          : BigInt(marketInfo.totalNoShares);
+          ? BigInt(marketInfo.yesShares)
+          : BigInt(marketInfo.noShares);
 
         if (totalWinningShares > BigInt(0)) {
           claimableWinnings = this.formatUSDC(
@@ -400,8 +400,8 @@ export class MarketsService {
       liquidityPool: this.formatUSDC(BigInt(marketInfo.liquidityPool)),
       yesProbability: probabilities.yesProbability,
       noProbability: probabilities.noProbability,
-      totalYesShares: this.formatUSDC(BigInt(marketInfo.totalYesShares)),
-      totalNoShares: this.formatUSDC(BigInt(marketInfo.totalNoShares)),
+      totalYesShares: this.formatUSDC(BigInt(marketInfo.yesShares)),
+      totalNoShares: this.formatUSDC(BigInt(marketInfo.noShares)),
       status,
       resolved: marketInfo.resolved,
       winningOutcome: marketInfo.resolved ? marketInfo.winningOutcome : undefined,
@@ -548,8 +548,8 @@ export class MarketsService {
       // Market resolved
       const winningShares = marketInfo.winningOutcome ? yesShares : noShares;
       const totalWinningShares = marketInfo.winningOutcome
-        ? BigInt(marketInfo.totalYesShares)
-        : BigInt(marketInfo.totalNoShares);
+        ? BigInt(marketInfo.yesShares)
+        : BigInt(marketInfo.noShares);
 
       if (totalWinningShares > BigInt(0)) {
         const winningsAmount = (winningShares * BigInt(marketInfo.liquidityPool)) / totalWinningShares;
@@ -691,8 +691,8 @@ export class MarketsService {
     }
 
     const totalWinningShares = marketInfo.winningOutcome
-      ? BigInt(marketInfo.totalYesShares)
-      : BigInt(marketInfo.totalNoShares);
+      ? BigInt(marketInfo.yesShares)
+      : BigInt(marketInfo.noShares);
 
     const winningsAmount =
       totalWinningShares > BigInt(0)
