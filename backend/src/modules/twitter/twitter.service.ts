@@ -36,6 +36,40 @@ interface TwitterAPITweetsResponse {
   }>;
 }
 
+interface TwitterAPITweetResponse {
+  data: {
+    id: string;
+    text: string;
+    author_id: string;
+    created_at: string;
+    entities?: {
+      mentions?: Array<{
+        start: number;
+        end: number;
+        username: string;
+      }>;
+    };
+  };
+  includes?: {
+    users?: Array<{
+      id: string;
+      username: string;
+      name: string;
+    }>;
+  };
+}
+
+export interface TweetVerification {
+  tweetId: string;
+  authorId: string;
+  authorUsername: string;
+  text: string;
+  mentions: string[];
+  createdAt: Date;
+  isValid: boolean;
+  errors: string[];
+}
+
 @Injectable()
 export class TwitterService {
   private readonly logger = new Logger(TwitterService.name);
@@ -278,6 +312,137 @@ export class TwitterService {
     } catch (error) {
       this.logger.error(`Failed to search Twitter:`, error.message);
       throw error;
+    }
+  }
+
+  /**
+   * Extract tweet ID from Twitter URL
+   */
+  extractTweetId(tweetUrl: string): string | null {
+    // Support formats:
+    // - https://twitter.com/username/status/1234567890
+    // - https://x.com/username/status/1234567890
+    // - https://www.twitter.com/username/status/1234567890
+    const match = tweetUrl.match(/(?:twitter|x)\.com\/\w+\/status\/(\d+)/);
+    return match ? match[1] : null;
+  }
+
+  /**
+   * Verify a tweet for dividend claims
+   * Checks:
+   * 1. Tweet exists
+   * 2. Tweet is by the specified user
+   * 3. Tweet contains @guesslydotfun mention
+   * 4. Tweet mentions at least one creator
+   */
+  async verifyTweet(
+    tweetUrl: string,
+    expectedAuthorId: string,
+    requiredCreatorHandles: string[],
+  ): Promise<TweetVerification> {
+    if (!this.bearerToken) {
+      throw new BadRequestException('Twitter API not configured');
+    }
+
+    const tweetId = this.extractTweetId(tweetUrl);
+
+    if (!tweetId) {
+      return {
+        tweetId: '',
+        authorId: '',
+        authorUsername: '',
+        text: '',
+        mentions: [],
+        createdAt: new Date(),
+        isValid: false,
+        errors: ['Invalid tweet URL format'],
+      };
+    }
+
+    try {
+      const response = await fetch(
+        `${this.API_BASE_URL}/tweets/${tweetId}?tweet.fields=author_id,created_at,entities&expansions=author_id`,
+        {
+          headers: {
+            Authorization: `Bearer ${this.bearerToken}`,
+          },
+        },
+      );
+
+      if (!response.ok) {
+        if (response.status === 404) {
+          return {
+            tweetId,
+            authorId: '',
+            authorUsername: '',
+            text: '',
+            mentions: [],
+            createdAt: new Date(),
+            isValid: false,
+            errors: ['Tweet not found'],
+          };
+        }
+        throw new Error(`Twitter API error: ${response.statusText}`);
+      }
+
+      const data: TwitterAPITweetResponse = await response.json();
+      const tweet = data.data;
+      const author = data.includes?.users?.[0];
+
+      const errors: string[] = [];
+
+      // Check author matches expected user
+      if (tweet.author_id !== expectedAuthorId) {
+        errors.push('Tweet is not by the expected user');
+      }
+
+      // Extract mentions from tweet
+      const mentions = tweet.entities?.mentions?.map((m) => m.username.toLowerCase()) || [];
+
+      // Also check text for @mentions (fallback if entities not available)
+      const textMentions = tweet.text.match(/@(\w+)/g)?.map((m) => m.slice(1).toLowerCase()) || [];
+      const allMentions = [...new Set([...mentions, ...textMentions])];
+
+      // Check for @guesslydotfun mention
+      if (!allMentions.includes('guesslydotfun')) {
+        errors.push('Tweet must mention @guesslydotfun');
+      }
+
+      // Check for at least one creator mention
+      const creatorHandlesLower = requiredCreatorHandles.map((h) =>
+        h.toLowerCase().replace('@', ''),
+      );
+      const hasCreatorMention = creatorHandlesLower.some((handle) => allMentions.includes(handle));
+
+      if (!hasCreatorMention) {
+        errors.push(
+          `Tweet must mention at least one creator: ${requiredCreatorHandles.join(', ')}`,
+        );
+      }
+
+      return {
+        tweetId,
+        authorId: tweet.author_id,
+        authorUsername: author?.username || '',
+        text: tweet.text,
+        mentions: allMentions,
+        createdAt: new Date(tweet.created_at),
+        isValid: errors.length === 0,
+        errors,
+      };
+    } catch (error) {
+      this.logger.error(`Failed to verify tweet ${tweetId}:`, error.message);
+
+      return {
+        tweetId,
+        authorId: '',
+        authorUsername: '',
+        text: '',
+        mentions: [],
+        createdAt: new Date(),
+        isValid: false,
+        errors: [`Failed to fetch tweet: ${error.message}`],
+      };
     }
   }
 }

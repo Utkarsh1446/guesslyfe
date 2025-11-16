@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { DividendEpoch } from '../../database/entities/dividend-epoch.entity';
@@ -7,15 +7,26 @@ import { DividendClaim } from '../../database/entities/dividend-claim.entity';
 import { Creator } from '../../database/entities/creator.entity';
 import { User } from '../../database/entities/user.entity';
 import { CreatorShareService } from '../../contracts/creator-share.service';
+import { TwitterService } from '../twitter/twitter.service';
+import { ContractsService } from '../../contracts/contracts.service';
 import {
   DividendEpochDto,
   ClaimableDividendDto,
   DividendClaimDto,
   CurrentEpochInfoDto,
 } from './dto/dividend-response.dto';
+import {
+  ClaimableDividendsResponseDto,
+  ClaimableByCreatorDto,
+  InitiateClaimResponseDto,
+  CompleteClaimResponseDto,
+} from './dto/dividend-claim-workflow.dto';
 
 @Injectable()
 export class DividendsService {
+  private readonly MIN_CLAIM_AMOUNT = 5; // $5 USDC minimum
+  private readonly MIN_CLAIM_DAYS = 7; // 7 days minimum wait
+
   constructor(
     @InjectRepository(DividendEpoch)
     private readonly dividendEpochRepository: Repository<DividendEpoch>,
@@ -28,6 +39,8 @@ export class DividendsService {
     @InjectRepository(User)
     private readonly userRepository: Repository<User>,
     private readonly creatorShareService: CreatorShareService,
+    private readonly twitterService: TwitterService,
+    private readonly contractsService: ContractsService,
   ) {}
 
   /**
@@ -310,6 +323,295 @@ export class DividendsService {
       transactionHash: claimable.transactionHash,
       epochEndTime: claimable.dividendEpoch.endTime,
     });
+  }
+
+  /**
+   * Get claimable dividends with requirements check
+   */
+  async getClaimableDividends(userAddress: string): Promise<ClaimableDividendsResponseDto> {
+    const claimable = await this.claimableDividendRepository.find({
+      where: {
+        shareholder: userAddress.toLowerCase(),
+        isClaimed: false,
+      },
+      relations: ['dividendEpoch'],
+      order: { dividendEpoch: { epochNumber: 'ASC' } },
+    });
+
+    if (claimable.length === 0) {
+      return new ClaimableDividendsResponseDto({
+        total: '0.000000',
+        byCreator: [],
+        requirements: {
+          minAmount: this.MIN_CLAIM_AMOUNT,
+          minDays: this.MIN_CLAIM_DAYS,
+        },
+        canClaim: false,
+        userAddress,
+      });
+    }
+
+    // Group by creator
+    const byCreatorMap = new Map<string, ClaimableDividend[]>();
+
+    for (const c of claimable) {
+      const creatorAddress = c.dividendEpoch.creatorAddress;
+      if (!byCreatorMap.has(creatorAddress)) {
+        byCreatorMap.set(creatorAddress, []);
+      }
+      byCreatorMap.get(creatorAddress)!.push(c);
+    }
+
+    const byCreator: ClaimableByCreatorDto[] = [];
+    let totalAmount = BigInt(0);
+
+    for (const [creatorAddress, dividends] of byCreatorMap.entries()) {
+      // Get creator info
+      const creator = await this.creatorRepository.findOne({
+        where: { creatorAddress: creatorAddress.toLowerCase() },
+        relations: ['user'],
+      });
+
+      if (!creator) continue;
+
+      // Calculate total for this creator
+      const creatorTotal = dividends.reduce(
+        (sum, d) => sum + BigInt(d.claimableAmount),
+        BigInt(0),
+      );
+
+      totalAmount += creatorTotal;
+
+      // Get earliest and latest epochs
+      const epochs = dividends.map((d) => d.dividendEpoch);
+      const earliestEpoch = Math.min(...epochs.map((e) => e.epochNumber));
+      const latestEpoch = Math.max(...epochs.map((e) => e.epochNumber));
+
+      // Calculate days since first claimable
+      const firstEndTime = epochs.sort(
+        (a, b) => a.endTime.getTime() - b.endTime.getTime(),
+      )[0].endTime;
+      const daysSinceFirst = Math.floor((Date.now() - firstEndTime.getTime()) / (1000 * 60 * 60 * 24));
+
+      // Check if meets requirements
+      const creatorAmount = parseFloat(this.formatUSDC(creatorTotal));
+      const canClaim =
+        creatorAmount >= this.MIN_CLAIM_AMOUNT || daysSinceFirst >= this.MIN_CLAIM_DAYS;
+
+      byCreator.push(
+        new ClaimableByCreatorDto({
+          creatorAddress,
+          creatorHandle: '@' + creator.user.twitterHandle,
+          amount: this.formatUSDC(creatorTotal),
+          epochCount: dividends.length,
+          earliestEpoch,
+          latestEpoch,
+          canClaim,
+          daysSinceFirst,
+        }),
+      );
+    }
+
+    // Sort by amount descending
+    byCreator.sort((a, b) => parseFloat(b.amount) - parseFloat(a.amount));
+
+    // Can claim if any creator meets requirements
+    const canClaim = byCreator.some((c) => c.canClaim);
+
+    return new ClaimableDividendsResponseDto({
+      total: this.formatUSDC(totalAmount),
+      byCreator,
+      requirements: {
+        minAmount: this.MIN_CLAIM_AMOUNT,
+        minDays: this.MIN_CLAIM_DAYS,
+      },
+      canClaim,
+      userAddress,
+    });
+  }
+
+  /**
+   * Initiate claim process - generate tweet text
+   */
+  async initiateClaim(userId: string, creatorIds: string[]): Promise<InitiateClaimResponseDto> {
+    const user = await this.userRepository.findOne({ where: { id: userId } });
+
+    if (!user || !user.walletAddress) {
+      throw new NotFoundException('User or wallet address not found');
+    }
+
+    if (creatorIds.length === 0) {
+      throw new BadRequestException('At least one creator must be specified');
+    }
+
+    // Get claimable dividends for these creators
+    const claimable = await this.claimableDividendRepository.find({
+      where: {
+        shareholder: user.walletAddress.toLowerCase(),
+        isClaimed: false,
+      },
+      relations: ['dividendEpoch'],
+    });
+
+    const relevantDividends = claimable.filter((c) =>
+      creatorIds.includes(c.dividendEpoch.creatorAddress.toLowerCase()),
+    );
+
+    if (relevantDividends.length === 0) {
+      throw new BadRequestException('No claimable dividends found for specified creators');
+    }
+
+    // Get creator handles
+    const creatorHandles: string[] = [];
+    let totalAmount = BigInt(0);
+
+    const uniqueCreators = new Set(relevantDividends.map((d) => d.dividendEpoch.creatorAddress));
+
+    for (const creatorAddress of uniqueCreators) {
+      const creator = await this.creatorRepository.findOne({
+        where: { creatorAddress: creatorAddress.toLowerCase() },
+        relations: ['user'],
+      });
+
+      if (creator) {
+        creatorHandles.push('@' + creator.user.twitterHandle);
+      }
+
+      // Calculate total for this creator
+      const creatorDividends = relevantDividends.filter(
+        (d) => d.dividendEpoch.creatorAddress === creatorAddress,
+      );
+      totalAmount += creatorDividends.reduce(
+        (sum, d) => sum + BigInt(d.claimableAmount),
+        BigInt(0),
+      );
+    }
+
+    // Generate tweet text
+    const tweetText = this.generateClaimTweetText(creatorHandles, totalAmount);
+
+    // Generate tracking ID (timestamp + user ID hash)
+    const tweetTrackingId = `claim-${Date.now()}-${user.id.slice(0, 8)}`;
+
+    // Set expiration (1 hour from now)
+    const expiresAt = new Date(Date.now() + 60 * 60 * 1000);
+
+    return new InitiateClaimResponseDto({
+      tweetText,
+      tweetTrackingId,
+      totalAmount: this.formatUSDC(totalAmount),
+      creatorHandles,
+      expiresAt,
+    });
+  }
+
+  /**
+   * Complete claim process - verify tweet and return unsigned transaction
+   */
+  async completeClaim(
+    userId: string,
+    tweetUrl: string,
+    creatorIds: string[],
+  ): Promise<CompleteClaimResponseDto> {
+    const user = await this.userRepository.findOne({ where: { id: userId } });
+
+    if (!user || !user.walletAddress || !user.twitterId) {
+      throw new NotFoundException('User, wallet address, or Twitter ID not found');
+    }
+
+    if (creatorIds.length === 0) {
+      throw new BadRequestException('At least one creator must be specified');
+    }
+
+    // Get creator handles for verification
+    const creatorHandles: string[] = [];
+    for (const creatorId of creatorIds) {
+      const creator = await this.creatorRepository.findOne({
+        where: { creatorAddress: creatorId.toLowerCase() },
+        relations: ['user'],
+      });
+
+      if (creator) {
+        creatorHandles.push('@' + creator.user.twitterHandle);
+      }
+    }
+
+    // Verify tweet
+    const verification = await this.twitterService.verifyTweet(
+      tweetUrl,
+      user.twitterId,
+      creatorHandles,
+    );
+
+    if (!verification.isValid) {
+      throw new BadRequestException(
+        `Tweet verification failed: ${verification.errors.join(', ')}`,
+      );
+    }
+
+    // Get claimable dividends
+    const claimable = await this.claimableDividendRepository.find({
+      where: {
+        shareholder: user.walletAddress.toLowerCase(),
+        isClaimed: false,
+      },
+      relations: ['dividendEpoch'],
+    });
+
+    const relevantDividends = claimable.filter((c) =>
+      creatorIds.includes(c.dividendEpoch.creatorAddress.toLowerCase()),
+    );
+
+    if (relevantDividends.length === 0) {
+      throw new BadRequestException('No claimable dividends found');
+    }
+
+    // Calculate total amount
+    const totalAmount = relevantDividends.reduce(
+      (sum, d) => sum + BigInt(d.claimableAmount),
+      BigInt(0),
+    );
+
+    // Get CreatorShareFactory contract
+    const factoryContract = await this.contractsService.getCreatorShareFactoryContract();
+
+    // Encode function call: claimDividends(address[] creators)
+    const data = factoryContract.interface.encodeFunctionData('claimDividends', [
+      creatorIds.map((id) => id.toLowerCase()),
+    ]);
+
+    const unsignedTx = {
+      to: await this.contractsService.getContractAddress('CreatorShareFactory'),
+      data,
+      value: '0',
+      gasLimit: '500000',
+      description: `Claim ${this.formatUSDC(totalAmount)} USDC in dividends from ${creatorIds.length} creator(s)`,
+    };
+
+    return new CompleteClaimResponseDto({
+      unsignedTx,
+      amount: this.formatUSDC(totalAmount),
+      creators: creatorIds,
+      tweetId: verification.tweetId,
+      tweetVerified: true,
+    });
+  }
+
+  /**
+   * Helper: Generate tweet text for claiming
+   */
+  private generateClaimTweetText(creatorHandles: string[], amount: bigint): string {
+    const formattedAmount = this.formatUSDC(amount);
+
+    if (creatorHandles.length === 1) {
+      return `Claiming $${formattedAmount} in dividends from ${creatorHandles[0]} on @guesslydotfun! 💰`;
+    } else if (creatorHandles.length === 2) {
+      return `Claiming $${formattedAmount} in dividends from ${creatorHandles[0]} and ${creatorHandles[1]} on @guesslydotfun! 💰`;
+    } else {
+      const first = creatorHandles.slice(0, 2).join(', ');
+      const remaining = creatorHandles.length - 2;
+      return `Claiming $${formattedAmount} in dividends from ${first} and ${remaining} other creator${remaining > 1 ? 's' : ''} on @guesslydotfun! 💰`;
+    }
   }
 
   /**

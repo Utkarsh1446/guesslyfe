@@ -9,6 +9,7 @@ import { Creator } from '../../database/entities/creator.entity';
 import { User } from '../../database/entities/user.entity';
 import { ContractsModule } from '../../contracts/contracts.module';
 import { AuthModule } from '../auth/auth.module';
+import { TwitterModule } from '../twitter/twitter.module';
 
 @Module({
   imports: [
@@ -21,6 +22,7 @@ import { AuthModule } from '../auth/auth.module';
     ]),
     ContractsModule,
     AuthModule,
+    TwitterModule,
   ],
   controllers: [DividendsController],
   providers: [DividendsService],

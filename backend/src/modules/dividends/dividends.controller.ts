@@ -1,6 +1,8 @@
 import {
   Controller,
   Get,
+  Post,
+  Body,
   Param,
   Query,
   UseGuards,
@@ -26,6 +28,13 @@ import {
   DividendClaimDto,
   CurrentEpochInfoDto,
 } from './dto/dividend-response.dto';
+import {
+  ClaimableDividendsResponseDto,
+  InitiateClaimDto,
+  InitiateClaimResponseDto,
+  CompleteClaimDto,
+  CompleteClaimResponseDto,
+} from './dto/dividend-claim-workflow.dto';
 
 @ApiTags('Dividends')
 @Controller('dividends')
@@ -128,5 +137,68 @@ export class DividendsController {
     @Query('offset', new DefaultValuePipe(0), ParseIntPipe) offset: number,
   ): Promise<DividendClaimDto[]> {
     return this.dividendsService.getUserClaimHistory(session.userId, limit, offset);
+  }
+
+  /**
+   * Get claimable dividends for a wallet address
+   */
+  @Get('claimable/:address')
+  @UseGuards(AuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Get claimable dividends for wallet address',
+    description:
+      'Returns all claimable dividends grouped by creator with requirement checks. ' +
+      'Minimum requirements: $5 OR 7 days since first claimable dividend.',
+  })
+  @ApiParam({ name: 'address', description: 'Wallet address' })
+  @ApiResponse({ status: 200, description: 'Claimable dividends', type: ClaimableDividendsResponseDto })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  async getClaimableDividends(@Param('address') address: string): Promise<ClaimableDividendsResponseDto> {
+    return this.dividendsService.getClaimableDividends(address);
+  }
+
+  /**
+   * Initiate dividend claim process
+   */
+  @Post('initiate-claim')
+  @UseGuards(AuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Initiate dividend claim process',
+    description:
+      'Generates tweet text for claiming dividends. User must post this tweet to verify ownership. ' +
+      'Tweet must include @guesslydotfun and mention at least one creator.',
+  })
+  @ApiResponse({ status: 200, description: 'Tweet text generated', type: InitiateClaimResponseDto })
+  @ApiResponse({ status: 400, description: 'No claimable dividends or invalid creators' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  async initiateClaim(
+    @CurrentUser() session: Session,
+    @Body() dto: InitiateClaimDto,
+  ): Promise<InitiateClaimResponseDto> {
+    return this.dividendsService.initiateClaim(session.userId, dto.creatorIds);
+  }
+
+  /**
+   * Complete dividend claim process
+   */
+  @Post('complete-claim')
+  @UseGuards(AuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Complete dividend claim process',
+    description:
+      'Verifies tweet and returns unsigned transaction for claiming dividends. ' +
+      'Tweet must: 1) Be by the user 2) Contain @guesslydotfun 3) Mention at least one creator.',
+  })
+  @ApiResponse({ status: 200, description: 'Unsigned transaction for claiming', type: CompleteClaimResponseDto })
+  @ApiResponse({ status: 400, description: 'Tweet verification failed or no claimable dividends' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
+  async completeClaim(
+    @CurrentUser() session: Session,
+    @Body() dto: CompleteClaimDto,
+  ): Promise<CompleteClaimResponseDto> {
+    return this.dividendsService.completeClaim(session.userId, dto.tweetUrl, dto.creatorIds);
   }
 }
