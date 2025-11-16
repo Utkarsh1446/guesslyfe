@@ -9,7 +9,7 @@ import { TwitterUserDto, TwitterMetricsDto, SyncResultDto } from './dto/twitter-
 import { TwitterAPIService, TweetVerification } from './twitter-api.service';
 import { TwitterScraperService } from './twitter-scraper.service';
 
-export { TweetVerification } from './twitter-api.service';
+export type { TweetVerification } from './twitter-api.service';
 
 @Injectable()
 export class TwitterService {

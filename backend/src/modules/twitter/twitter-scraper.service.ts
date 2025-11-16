@@ -111,7 +111,7 @@ export class TwitterScraperService {
       await page.evaluate(() => {
         window.scrollBy(0, 1000);
       });
-      await page.waitForTimeout(2000);
+      await new Promise(resolve => setTimeout(resolve, 2000));
 
       // Extract recent tweets with engagement
       const recentTweets = await page.evaluate(() => {
