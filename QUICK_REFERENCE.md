@@ -1,7 +1,7 @@
 # 🚀 Guessly Platform - Quick Reference
 
-**Status**: ✅ LIVE  
-**Date**: November 14, 2025
+**Status**: ✅ LIVE
+**Date**: November 16, 2025 (Updated with Virtual Liquidity Bootstrapping)
 
 ---
 
@@ -19,12 +19,19 @@ Health:       https://guessly-backend-738787111842.us-central1.run.app/api/v1/he
 
 ## 🔗 Smart Contracts (Base Sepolia)
 
-### Contract Addresses
+### Contract Addresses (Virtual Liquidity Enabled)
 ```
-FeeCollector:        0x86d036b59d23e0BF6e7A43d8e625c005Aa8bd7B4
-CreatorShareFactory: 0xe941e7fC3aaFecb944E70FCe236BD638ACCbDD53
-OpinionMarket:       0x60a308C4e4d653F5BA6c5EFf412C9cDc3FAEEc72
+FeeCollector:        0x9E0e83E0569d42a3A0420F68fe4D967F4C10F423
+CreatorShareFactory: 0xaE86eC369E33A74769Ef7A1609b76E84B417c5Db
+OpinionMarket:       0x9cC5bBBceb80bE28f9be3F7dd69dC815Ba64099C
 USDC (Testnet):      0x036CbD53842c5426634e7929541eC2318f3dCF7e
+```
+
+### Virtual Liquidity
+```
+Per Outcome:   5000 USDC
+Purpose:       Fair initial pricing (prevents 100% jumps)
+Markets:       Start at 50/50 probability
 ```
 
 ### Network
