@@ -12,6 +12,7 @@ import { OpinionMarket } from '../database/entities/opinion-market.entity';
 import { QUEUE_NAMES, JOB_TYPES } from './queue.constants';
 import { CreatorStatus } from '../database/enums';
 import { CreatorShareFactoryService } from '../contracts/creator-share-factory.service';
+import { TwitterScraperService } from '../modules/twitter/twitter-scraper.service';
 
 @Injectable()
 export class ScheduledTasksService {
@@ -21,6 +22,10 @@ export class ScheduledTasksService {
   private readonly MARKET_FEE_BPS = 15; // 0.15%
   private readonly FEE_PRECISION = 10000;
   private readonly VOLUME_THRESHOLD = 30000; // $30,000 USDC
+  private readonly MIN_FOLLOWERS_REQUIRED = 1000; // Minimum followers to remain eligible
+  private readonly TWITTER_API_RATE_LIMIT = 450; // Requests per 15 minutes
+  private readonly TWITTER_BATCH_SIZE = 100; // Process 100 creators at a time
+  private readonly TWITTER_CACHE_TTL = 6 * 60 * 60 * 1000; // 6 hours in milliseconds
 
   constructor(
     @InjectRepository(Creator)
@@ -41,9 +46,12 @@ export class ScheduledTasksService {
     private readonly notificationQueue: Queue,
     @InjectQueue(QUEUE_NAMES.VOLUME_TRACKER)
     private readonly volumeTrackerQueue: Queue,
+    @InjectQueue(QUEUE_NAMES.TWITTER_SCRAPER)
+    private readonly twitterScraperQueue: Queue,
     private readonly dataSource: DataSource,
     private readonly schedulerRegistry: SchedulerRegistry,
     private readonly creatorShareFactoryService: CreatorShareFactoryService,
+    private readonly twitterScraperService: TwitterScraperService,
   ) {}
 
   /**
@@ -823,6 +831,253 @@ export class ScheduledTasksService {
   }
 
   /**
+   * Twitter Data Update Job
+   * Runs every 6 hours to update creator Twitter metrics
+   * Cron: '0 * /6 * * *' (minute hour day month dayOfWeek)
+   */
+  @Cron('0 */6 * * *', {
+    name: 'update-twitter-data',
+    timeZone: 'UTC',
+  })
+  async updateTwitterData() {
+    const startTime = Date.now();
+    const jobName = 'Twitter Data Update';
+
+    this.logger.log(`========================================`);
+    this.logger.log(`Starting ${jobName} at ${new Date().toISOString()}`);
+    this.logger.log(`========================================`);
+
+    try {
+      // Execute Twitter data update
+      await this.executeTwitterDataUpdate();
+
+      const executionTime = Date.now() - startTime;
+      this.logger.log(`${jobName} completed successfully in ${executionTime}ms`);
+
+      // Alert if execution took too long (>15 minutes warning threshold)
+      if (executionTime > 15 * 60 * 1000) {
+        this.logger.warn(`⚠️  ${jobName} took ${executionTime}ms - consider optimization`);
+        await this.sendAlert({
+          type: 'warning',
+          message: `${jobName} took ${executionTime}ms`,
+          threshold: '15 minutes',
+        });
+      }
+
+    } catch (error) {
+      const executionTime = Date.now() - startTime;
+      this.logger.error(
+        `❌ ${jobName} FAILED after ${executionTime}ms: ${error.message}`,
+        error.stack,
+      );
+
+      // Send critical alert
+      await this.sendAlert({
+        type: 'critical',
+        message: `${jobName} failed: ${error.message}`,
+        stack: error.stack,
+        executionTime,
+      });
+
+      // Re-throw to mark job as failed
+      throw error;
+    }
+  }
+
+  /**
+   * Execute the complete Twitter data update workflow
+   */
+  private async executeTwitterDataUpdate(): Promise<void> {
+    // Get all active creators (APPROVED status)
+    const activeCreators = await this.creatorRepository.find({
+      where: {
+        status: CreatorStatus.APPROVED,
+      },
+      order: {
+        updatedAt: 'ASC', // Process least recently updated first
+      },
+    });
+
+    this.logger.log(`Found ${activeCreators.length} active creators`);
+
+    if (activeCreators.length === 0) {
+      this.logger.log('No creators to process. Exiting.');
+      return;
+    }
+
+    const results = {
+      total: activeCreators.length,
+      updated: 0,
+      failed: 0,
+      flaggedForReview: 0,
+      errors: [] as any[],
+    };
+
+    // Process in batches to respect rate limits
+    const batches = this.chunkArray(activeCreators, this.TWITTER_BATCH_SIZE);
+    this.logger.log(`Processing ${batches.length} batches of ${this.TWITTER_BATCH_SIZE} creators`);
+
+    // Calculate delay between requests to respect rate limit
+    // 450 requests per 15 minutes = 1 request per 2 seconds
+    const delayBetweenRequests = (15 * 60 * 1000) / this.TWITTER_API_RATE_LIMIT;
+
+    for (let batchIndex = 0; batchIndex < batches.length; batchIndex++) {
+      const batch = batches[batchIndex];
+      this.logger.log(`Processing batch ${batchIndex + 1}/${batches.length} (${batch.length} creators)`);
+
+      for (const creator of batch) {
+        try {
+          const flagged = await this.updateCreatorTwitterData(creator);
+          if (flagged) {
+            results.flaggedForReview++;
+          }
+          results.updated++;
+
+          // Rate limiting: wait between requests
+          await this.sleep(delayBetweenRequests);
+
+        } catch (error) {
+          results.failed++;
+          results.errors.push({
+            creatorId: creator.id,
+            handle: creator.twitterHandle,
+            error: error.message,
+          });
+          this.logger.error(
+            `Failed to update Twitter data for ${creator.twitterHandle}: ${error.message}`,
+          );
+
+          // Continue with next creator even if one fails
+        }
+      }
+
+      // Add longer delay between batches
+      if (batchIndex < batches.length - 1) {
+        this.logger.log(`Waiting 5 seconds before next batch...`);
+        await this.sleep(5000);
+      }
+    }
+
+    // Log summary
+    this.logger.log(`========================================`);
+    this.logger.log(`Twitter Data Update Summary:`);
+    this.logger.log(`  Total Creators: ${results.total}`);
+    this.logger.log(`  ✅ Updated: ${results.updated}`);
+    this.logger.log(`  ⚠️  Flagged for Review: ${results.flaggedForReview}`);
+    this.logger.log(`  ❌ Failed: ${results.failed}`);
+    if (results.failed > 0) {
+      this.logger.error(`  Errors:`, JSON.stringify(results.errors, null, 2));
+    }
+    this.logger.log(`========================================`);
+
+    // Send summary alert if many creators flagged
+    if (results.flaggedForReview > 0) {
+      await this.sendAlert({
+        type: 'warning',
+        message: `${results.flaggedForReview} creators flagged for review (dropped below 1000 followers)`,
+        flaggedCount: results.flaggedForReview,
+      });
+    }
+  }
+
+  /**
+   * Update Twitter data for a single creator
+   * Returns true if creator was flagged for review
+   */
+  private async updateCreatorTwitterData(creator: Creator): Promise<boolean> {
+    this.logger.log(`Updating Twitter data for ${creator.twitterHandle} (${creator.id})`);
+
+    try {
+      // Scrape latest Twitter data
+      const twitterData = await this.twitterScraperService.scrapeUserEngagement(creator.twitterHandle);
+
+      // Calculate post count from last 30 days
+      const thirtyDaysAgo = new Date();
+      thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+
+      const recentTweets = twitterData.recentTweets.filter(
+        tweet => new Date(tweet.timestamp) >= thirtyDaysAgo
+      );
+
+      const postCount30d = recentTweets.length;
+
+      // Update creator record
+      const previousFollowerCount = creator.followerCount;
+      creator.followerCount = twitterData.followerCount;
+      creator.engagementRate = twitterData.engagementRate;
+      creator.postCount30d = postCount30d;
+
+      this.logger.log(
+        `${creator.twitterHandle}: ${twitterData.followerCount} followers (${twitterData.followerCount >= previousFollowerCount ? '+' : ''}${twitterData.followerCount - previousFollowerCount}), ` +
+        `${twitterData.engagementRate}% engagement, ${postCount30d} posts/30d`
+      );
+
+      // Check if creator dropped below minimum requirements
+      if (creator.followerCount < this.MIN_FOLLOWERS_REQUIRED && creator.status === CreatorStatus.APPROVED) {
+        this.logger.warn(
+          `⚠️  ${creator.twitterHandle} dropped below minimum ${this.MIN_FOLLOWERS_REQUIRED} followers ` +
+          `(current: ${creator.followerCount}). Flagging for review.`
+        );
+
+        // Don't auto-disable, but flag for manual review
+        // Admin can decide whether to disable or give grace period
+
+        // Queue notification to admin
+        await this.notificationQueue.add(
+          JOB_TYPES.NOTIFICATION.SEND_WEBHOOK,
+          {
+            type: 'webhook',
+            recipient: process.env.ALERT_WEBHOOK_URL || 'http://localhost:3000/alerts',
+            subject: `Creator Below Minimum Followers`,
+            data: {
+              creatorId: creator.id,
+              creatorHandle: creator.twitterHandle,
+              currentFollowers: creator.followerCount,
+              requiredFollowers: this.MIN_FOLLOWERS_REQUIRED,
+              previousFollowers: previousFollowerCount,
+              engagementRate: creator.engagementRate,
+              timestamp: new Date().toISOString(),
+            },
+          },
+          {
+            priority: 1, // High priority
+            delay: 1000,
+          },
+        );
+
+        await this.creatorRepository.save(creator);
+        return true; // Flagged
+      }
+
+      // Save updated data
+      await this.creatorRepository.save(creator);
+
+      return false; // Not flagged
+    } catch (error) {
+      this.logger.error(`Error updating Twitter data for ${creator.twitterHandle}: ${error.message}`);
+      throw error;
+    }
+  }
+
+  /**
+   * Helper: Split array into chunks
+   */
+  private chunkArray<T>(array: T[], chunkSize: number): T[][] {
+    const chunks: T[][] = [];
+    for (let i = 0; i < array.length; i += chunkSize) {
+      chunks.push(array.slice(i, i + chunkSize));
+    }
+    return chunks;
+  }
+
+  /**
+   * Helper: Sleep for specified milliseconds
+   */
+  private sleep(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+  }
+
+  /**
    * Manual trigger for testing
    * Can be called via API endpoint
    */
@@ -838,5 +1093,14 @@ export class ScheduledTasksService {
   async triggerManualVolumeTracking(): Promise<any> {
     this.logger.log('🔧 Manual volume tracking triggered');
     return await this.trackCreatorVolumes();
+  }
+
+  /**
+   * Manual trigger for Twitter data update
+   * Can be called via API endpoint
+   */
+  async triggerManualTwitterUpdate(): Promise<any> {
+    this.logger.log('🔧 Manual Twitter data update triggered');
+    return await this.updateTwitterData();
   }
 }
