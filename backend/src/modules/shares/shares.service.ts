@@ -48,6 +48,11 @@ export class SharesService {
    * NOTE: This is READ-ONLY. Actual trading happens on frontend via user's wallet.
    */
   async getBuyPriceQuote(creatorAddress: string, amount: number): Promise<SharePriceQuoteDto> {
+    // Validate amount
+    if (amount <= 0) {
+      throw new BadRequestException('Amount must be greater than 0');
+    }
+
     // Validate creator exists
     const creator = await this.creatorRepository.findOne({
       where: { creatorAddress: creatorAddress.toLowerCase() },
@@ -94,6 +99,11 @@ export class SharesService {
    * NOTE: This is READ-ONLY. Actual trading happens on frontend via user's wallet.
    */
   async getSellPriceQuote(creatorAddress: string, amount: number): Promise<SharePriceQuoteDto> {
+    // Validate amount
+    if (amount <= 0) {
+      throw new BadRequestException('Amount must be greater than 0');
+    }
+
     // Validate creator exists
     const creator = await this.creatorRepository.findOne({
       where: { creatorAddress: creatorAddress.toLowerCase() },
@@ -465,7 +475,9 @@ export class SharesService {
     // Convert buckets to data points
     for (const [bucketKey, bucket] of Array.from(buckets.entries()).sort((a, b) => a[0] - b[0])) {
       // Calculate average price for this bucket
-      const avgPrice = bucket.prices.reduce((sum, p) => sum + p, BigInt(0)) / BigInt(bucket.prices.length);
+      const avgPrice = bucket.prices.length > 0
+        ? bucket.prices.reduce((sum, p) => sum + p, BigInt(0)) / BigInt(bucket.prices.length)
+        : BigInt(0);
 
       dataPoints.push({
         timestamp: new Date(bucketKey),

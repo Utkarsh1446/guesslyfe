@@ -102,6 +102,11 @@ export class MarketsService {
     outcome: 'YES' | 'NO',
     betAmount: number,
   ): Promise<MarketPriceQuoteDto> {
+    // Validate bet amount
+    if (betAmount <= 0) {
+      throw new BadRequestException('Bet amount must be greater than 0');
+    }
+
     const market = await this.opinionMarketRepository.findOne({
       where: { marketId: BigInt(marketId) },
     });
@@ -146,7 +151,9 @@ export class MarketsService {
       : 50;
     const newNoProbability = 100 - newYesProbability;
 
-    const pricePerShare = betAmountInUnits / expectedShares;
+    const pricePerShare = expectedShares > BigInt(0)
+      ? betAmountInUnits / expectedShares
+      : BigInt(0);
 
     return new MarketPriceQuoteDto({
       marketId,
@@ -209,10 +216,9 @@ export class MarketsService {
           : BigInt(marketInfo.noShares);
 
         if (totalWinningShares > BigInt(0)) {
-          claimableWinnings = this.contractsService.formatUSDC(
-            (winningShares * BigInt(marketInfo.liquidityPool)) / totalWinningShares,
-          );
-          currentValue = BigInt(claimableWinnings.replace('.', '').padEnd(6, '0'));
+          const winningsAmount = (winningShares * BigInt(marketInfo.liquidityPool)) / totalWinningShares;
+          claimableWinnings = this.contractsService.formatUSDC(winningsAmount);
+          currentValue = winningsAmount; // Use the BigInt directly, not the formatted string
         }
       } else {
         // Market active - estimate current value based on probabilities
