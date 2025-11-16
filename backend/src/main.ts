@@ -2,6 +2,10 @@
 import * as crypto from 'crypto';
 (global as any).crypto = crypto;
 
+// Initialize Sentry FIRST (before any other imports that might throw errors)
+import { initSentry } from './common/sentry/sentry';
+initSentry();
+
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
@@ -16,6 +20,8 @@ import cookieParser from 'cookie-parser';
 import { AppModule } from './app.module';
 import { AllExceptionsFilter } from './common/filters/http-exception.filter';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
+import { PerformanceInterceptor } from './common/interceptors/performance.interceptor';
+import { RequestLoggerMiddleware } from './common/middleware/request-logger.middleware';
 import { QUEUE_NAMES } from './jobs/queue.constants';
 import { adminAuthMiddleware } from './jobs/guards/admin-auth.guard';
 
@@ -65,7 +71,13 @@ async function bootstrap() {
   app.useGlobalFilters(new AllExceptionsFilter());
 
   // Global Interceptors
-  app.useGlobalInterceptors(new LoggingInterceptor());
+  app.useGlobalInterceptors(
+    new LoggingInterceptor(),
+    new PerformanceInterceptor(),
+  );
+
+  // Request Logging Middleware
+  app.use(new RequestLoggerMiddleware().use.bind(new RequestLoggerMiddleware()));
 
   // Swagger Documentation
   const swaggerEnabled = configService.get<boolean>('app.swagger.enabled');
