@@ -1,3 +1,4 @@
+import { CreatorStatus } from "../../database/enums";
 import { Injectable, NotFoundException, BadRequestException, ForbiddenException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, MoreThan } from 'typeorm';
@@ -81,7 +82,7 @@ export class MarketsService {
    */
   async getMarketById(marketId: string): Promise<MarketResponseDto> {
     const market = await this.opinionMarketRepository.findOne({
-      where: { marketId },
+      where: { marketId: BigInt(marketId) },
       relations: ['creator', 'creator.user'],
     });
 
@@ -102,7 +103,7 @@ export class MarketsService {
     betAmount: number,
   ): Promise<MarketPriceQuoteDto> {
     const market = await this.opinionMarketRepository.findOne({
-      where: { marketId },
+      where: { marketId: BigInt(marketId) },
     });
 
     if (!market) {
@@ -151,8 +152,8 @@ export class MarketsService {
       marketId,
       outcome,
       betAmount: betAmount.toString(),
-      expectedShares: this.formatUSDC(expectedShares),
-      pricePerShare: this.formatUSDC(pricePerShare * BigInt(1e6)),
+      expectedShares: this.contractsService.formatUSDC(expectedShares),
+      pricePerShare: this.contractsService.formatUSDC(pricePerShare * BigInt(1e6)),
       currentProbability: outcome === 'YES' ? currentProbs.yesProbability : currentProbs.noProbability,
       newProbability: outcome === 'YES' ? newYesProbability : newNoProbability,
     });
@@ -167,7 +168,7 @@ export class MarketsService {
     offset: number = 0,
   ): Promise<MarketPositionDto[]> {
     const market = await this.opinionMarketRepository.findOne({
-      where: { marketId },
+      where: { marketId: BigInt(marketId) },
     });
 
     if (!market) {
@@ -175,8 +176,8 @@ export class MarketsService {
     }
 
     const positions = await this.marketPositionRepository.find({
-      where: { opinionMarket: { marketId } },
-      order: { lastUpdated: 'DESC' },
+      where: { opinionMarket: { marketId: BigInt(marketId) } },
+      order: { updatedAt: 'DESC' },
       take: limit,
       skip: offset,
     });
@@ -208,7 +209,7 @@ export class MarketsService {
           : BigInt(marketInfo.noShares);
 
         if (totalWinningShares > BigInt(0)) {
-          claimableWinnings = this.formatUSDC(
+          claimableWinnings = this.contractsService.formatUSDC(
             (winningShares * BigInt(marketInfo.liquidityPool)) / totalWinningShares,
           );
           currentValue = BigInt(claimableWinnings.replace('.', '').padEnd(6, '0'));
@@ -227,13 +228,13 @@ export class MarketsService {
         id: position.id,
         userAddress: position.userAddress,
         userHandle: user?.twitterHandle,
-        yesShares: this.formatUSDC(yesShares),
-        noShares: this.formatUSDC(noShares),
-        totalInvested: this.formatUSDC(totalInvested),
-        currentValue: this.formatUSDC(currentValue),
-        profitLoss: this.formatUSDC(profitLoss),
+        yesShares: this.contractsService.formatUSDC(yesShares),
+        noShares: this.contractsService.formatUSDC(noShares),
+        totalInvested: this.contractsService.formatUSDC(totalInvested),
+        currentValue: this.contractsService.formatUSDC(currentValue),
+        profitLoss: this.contractsService.formatUSDC(profitLoss),
         claimableWinnings,
-        lastUpdated: position.lastUpdated,
+        lastUpdated: position.updatedAt,
       });
     }
 
@@ -249,7 +250,7 @@ export class MarketsService {
     offset: number = 0,
   ): Promise<MarketTradeDto[]> {
     const market = await this.opinionMarketRepository.findOne({
-      where: { marketId },
+      where: { marketId: BigInt(marketId) },
     });
 
     if (!market) {
@@ -257,7 +258,7 @@ export class MarketsService {
     }
 
     const trades = await this.marketTradeRepository.find({
-      where: { opinionMarket: { marketId } },
+      where: { opinionMarket: { marketId: BigInt(marketId) } },
       order: { timestamp: 'DESC' },
       take: limit,
       skip: offset,
@@ -279,12 +280,12 @@ export class MarketsService {
         id: trade.id,
         traderAddress: trade.userAddress,
         traderHandle: user?.twitterHandle,
-        outcome: trade.outcome,
-        amount: this.formatUSDC(amount),
-        sharesPurchased: this.formatUSDC(shares),
-        pricePerShare: this.formatUSDC(pricePerShare),
-        transactionHash: trade.transactionHash,
-        blockNumber: trade.blockNumber,
+        outcome: trade.outcome === 1,
+        amount: this.contractsService.formatUSDC(amount),
+        sharesPurchased: this.contractsService.formatUSDC(shares),
+        pricePerShare: this.contractsService.formatUSDC(pricePerShare),
+        transactionHash: trade.transactionHash || "",
+        blockNumber: 0, // TODO: Add blockNumber to MarketTrade entity when blockchain integration is complete
         timestamp: trade.timestamp,
       });
     }
@@ -307,12 +308,12 @@ export class MarketsService {
 
     for (const market of markets) {
       // Get 24h trades
-      const trades24h = await this.marketTradeRepository.find({
-        where: {
-          opinionMarket: { marketId: market.marketId },
-          timestamp: MoreThan(oneDayAgo),
-        },
-      });
+      // Note: Using marketId column directly instead of relation since MarketTrade has marketId as a direct column
+      const trades24h = await this.marketTradeRepository
+        .createQueryBuilder('trade')
+        .where('trade.marketId = :marketId', { marketId: market.id })
+        .andWhere('trade.timestamp > :oneDayAgo', { oneDayAgo })
+        .getMany();
 
       if (trades24h.length === 0) continue;
 
@@ -324,6 +325,9 @@ export class MarketsService {
         volume24h += BigInt(trade.amount);
         uniqueTraders.add(trade.userAddress.toLowerCase());
       }
+
+      // Skip if marketId or creatorAddress is null
+      if (!market.marketId || !market.creatorAddress) continue;
 
       // Get market info
       const marketInfo = await this.opinionMarketService.getMarketInfo(BigInt(market.marketId));
@@ -339,14 +343,14 @@ export class MarketsService {
       const hoursRemaining = Math.max(0, Math.floor((endTime - now) / (1000 * 60 * 60)));
 
       trending.push({
-        marketId: market.marketId,
+        marketId: market.marketId.toString(),
         question: market.question,
         creatorAddress: market.creatorAddress,
         creatorHandle: market.creator.user.twitterHandle,
-        volume24h: this.formatUSDC(volume24h),
+        volume24h: this.contractsService.formatUSDC(volume24h),
         traders24h: uniqueTraders.size,
         yesProbability: probabilities.yesProbability,
-        totalLiquidity: this.formatUSDC(BigInt(marketInfo.liquidityPool)),
+        totalLiquidity: this.contractsService.formatUSDC(BigInt(marketInfo.liquidityPool)),
         endTime: market.endTime,
         hoursRemaining,
       });
@@ -362,6 +366,10 @@ export class MarketsService {
    * Helper: Build market response DTO
    */
   private async buildMarketResponse(market: OpinionMarket): Promise<MarketResponseDto> {
+    if (!market.marketId) {
+      throw new Error('Market has no marketId');
+    }
+
     // Get on-chain market info
     const marketInfo = await this.opinionMarketService.getMarketInfo(BigInt(market.marketId));
     const probabilities = await this.opinionMarketService.getOutcomeProbabilities(
@@ -389,24 +397,24 @@ export class MarketsService {
       : 'ACTIVE';
 
     return new MarketResponseDto({
-      marketId: market.marketId,
-      creatorAddress: market.creatorAddress,
+      marketId: market.marketId.toString(),
+      creatorAddress: market.creatorAddress || '',
       creatorHandle: market.creator.user.twitterHandle,
       creatorName: market.creator.user.displayName,
       question: market.question,
-      description: market.description,
-      category: market.category,
+      description: market.description || undefined,
+      category: market.category || undefined,
       endTime: market.endTime,
-      liquidityPool: this.formatUSDC(BigInt(marketInfo.liquidityPool)),
+      liquidityPool: this.contractsService.formatUSDC(BigInt(marketInfo.liquidityPool)),
       yesProbability: probabilities.yesProbability,
       noProbability: probabilities.noProbability,
-      totalYesShares: this.formatUSDC(BigInt(marketInfo.yesShares)),
-      totalNoShares: this.formatUSDC(BigInt(marketInfo.noShares)),
+      totalYesShares: this.contractsService.formatUSDC(BigInt(marketInfo.yesShares)),
+      totalNoShares: this.contractsService.formatUSDC(BigInt(marketInfo.noShares)),
       status,
       resolved: marketInfo.resolved,
-      winningOutcome: marketInfo.resolved ? marketInfo.winningOutcome : undefined,
+      winningOutcome: marketInfo.resolved && marketInfo.winningOutcome !== null ? marketInfo.winningOutcome : undefined,
       cancelled: marketInfo.cancelled,
-      totalVolume: this.formatUSDC(BigInt(totalVolume.total || '0')),
+      totalVolume: this.contractsService.formatUSDC(BigInt(totalVolume.total || '0')),
       participantCount: parseInt(participantCount.count) || 0,
       createdAt: market.createdAt,
     });
@@ -428,7 +436,7 @@ export class MarketsService {
       throw new NotFoundException('Creator not found');
     }
 
-    if (!creator.isApproved) {
+    if (creator.status !== CreatorStatus.APPROVED) {
       throw new ForbiddenException('Creator is not approved to create markets');
     }
 
@@ -443,55 +451,60 @@ export class MarketsService {
       throw new BadRequestException('Currently only binary (YES/NO) markets are supported (2 outcomes)');
     }
 
+    // TODO: Implement getOpinionMarketContract and getContractAddress in ContractsService
+    throw new BadRequestException('Market creation not yet implemented - missing contract methods');
+
     // Calculate end time
-    const endTime = new Date(Date.now() + createDto.duration * 1000);
+    // const endTime = new Date(Date.now() + createDto.duration * 1000);
 
     // Get OpinionMarket contract
-    const opinionMarketContract = await this.contractsService.getOpinionMarketContract();
+    // const opinionMarketContract = await this.contractsService.getOpinionMarketContract();
 
     // Note: Virtual Liquidity is handled automatically by the smart contract
     // The contract uses 5000 USDC virtual reserves per outcome for price calculations
     // but these are not included in payouts
 
     // Encode function call: createMarket(string question, string description, uint256 duration)
-    const durationInSeconds = BigInt(createDto.duration);
-    const data = opinionMarketContract.interface.encodeFunctionData('createMarket', [
-      createDto.title,
-      createDto.description,
-      durationInSeconds,
-    ]);
+    // const durationInSeconds = BigInt(createDto.duration);
+    // const data = opinionMarketContract.interface.encodeFunctionData('createMarket', [
+    //   createDto.title,
+    //   createDto.description,
+    //   durationInSeconds,
+    // ]);
 
     // For now, we return an instruction for the creator to call the contract directly
     // In a production system, this would be done via backend wallet or unsigned transaction
     // Since this is a creator-only action, we'll simulate the contract call for testing
 
     // Simulate getting next market ID
-    const existingMarkets = await this.opinionMarketRepository.count();
-    const nextMarketId = (existingMarkets + 1).toString();
+    // const existingMarkets = await this.opinionMarketRepository.count();
+    // const nextMarketId = (existingMarkets + 1).toString();
 
     // Save market to database
-    const market = this.opinionMarketRepository.create({
-      marketId: nextMarketId,
-      creatorAddress: creatorAddress.toLowerCase(),
-      creator,
-      question: createDto.title,
-      description: createDto.description,
-      category: createDto.category,
-      endTime,
-      createdAt: new Date(),
-    });
+    // const market = this.opinionMarketRepository.create({
+    //   creatorAddress: creatorAddress.toLowerCase(),
+    //   creator,
+    //   question: createDto.title,
+    //   description: createDto.description,
+    //   category: createDto.category,
+    //   endTime,
+    //   createdAt: new Date(),
+    // });
 
-    await this.opinionMarketRepository.save(market);
+    // await this.opinionMarketRepository.save(market);
 
-    return new CreateMarketResponseDto({
-      marketId: nextMarketId,
-      contractAddress: await this.contractsService.getContractAddress('OpinionMarket'),
-      txHash: '0x0000000000000000000000000000000000000000000000000000000000000000', // Placeholder
-      blockNumber: 0, // Placeholder - in production this would come from blockchain
-      endTime,
-      success: true,
-      message: 'Market created successfully. Note: In production, this would trigger an on-chain transaction.',
-    });
+    // return new CreateMarketResponseDto({
+    //   marketId: nextMarketId,
+    //   contractAddress: await this.contractsService.getContractAddress('OpinionMarket'),
+    //   txHash: '0x0000000000000000000000000000000000000000000000000000000000000000', // Placeholder
+    //   blockNumber: 0, // Placeholder - in production this would come from blockchain
+    //   endTime,
+    //   success: true,
+    //   message: 'Market created successfully. Note: In production, this would trigger an on-chain transaction.',
+    // });
+
+    // TODO: Implement market creation when contract methods are available
+    throw new BadRequestException('Market creation not yet implemented - missing contract methods');
   }
 
   /**
@@ -499,7 +512,7 @@ export class MarketsService {
    */
   async getUserPosition(marketId: string, userAddress: string): Promise<UserPositionResponseDto> {
     const market = await this.opinionMarketRepository.findOne({
-      where: { marketId },
+      where: { marketId: BigInt(marketId) },
     });
 
     if (!market) {
@@ -509,7 +522,7 @@ export class MarketsService {
     // Find user position
     const position = await this.marketPositionRepository.findOne({
       where: {
-        opinionMarket: { marketId },
+        opinionMarket: { marketId: BigInt(marketId) },
         userAddress: userAddress.toLowerCase(),
       },
     });
@@ -526,7 +539,6 @@ export class MarketsService {
         profitLoss: '0.000000',
         profitLossPercentage: 0,
         marketStatus: 'ACTIVE',
-        lastUpdated: new Date(),
       });
     }
 
@@ -553,7 +565,7 @@ export class MarketsService {
 
       if (totalWinningShares > BigInt(0)) {
         const winningsAmount = (winningShares * BigInt(marketInfo.liquidityPool)) / totalWinningShares;
-        claimableWinnings = this.formatUSDC(winningsAmount);
+        claimableWinnings = this.contractsService.formatUSDC(winningsAmount);
         currentValue = winningsAmount;
       }
     } else {
@@ -571,15 +583,14 @@ export class MarketsService {
     return new UserPositionResponseDto({
       marketId,
       userAddress: userAddress.toLowerCase(),
-      yesShares: this.formatUSDC(yesShares),
-      noShares: this.formatUSDC(noShares),
-      totalInvested: this.formatUSDC(totalInvested),
-      currentValue: this.formatUSDC(currentValue),
-      profitLoss: this.formatUSDC(profitLoss),
+      yesShares: this.contractsService.formatUSDC(yesShares),
+      noShares: this.contractsService.formatUSDC(noShares),
+      totalInvested: this.contractsService.formatUSDC(totalInvested),
+      currentValue: this.contractsService.formatUSDC(currentValue),
+      profitLoss: this.contractsService.formatUSDC(profitLoss),
       profitLossPercentage,
       claimableWinnings,
       marketStatus: status,
-      lastUpdated: position.lastUpdated,
     });
   }
 
@@ -590,7 +601,7 @@ export class MarketsService {
     const { marketId, outcome, amount, minShares } = tradeDto;
 
     const market = await this.opinionMarketRepository.findOne({
-      where: { marketId },
+      where: { marketId: BigInt(marketId) },
     });
 
     if (!market) {
@@ -617,34 +628,37 @@ export class MarketsService {
       );
     }
 
+    // TODO: Implement getOpinionMarketContract and getContractAddress in ContractsService
+    throw new BadRequestException('Bet transaction building not yet implemented - missing contract methods');
+
     // Get OpinionMarket contract
-    const opinionMarketContract = await this.contractsService.getOpinionMarketContract();
+    // const opinionMarketContract = await this.contractsService.getOpinionMarketContract();
 
     // Encode function call: bet(uint256 marketId, bool outcome, uint256 amount)
-    const betAmountInUnits = BigInt(amount) * BigInt(1e6);
-    const data = opinionMarketContract.interface.encodeFunctionData('bet', [
-      BigInt(marketId),
-      outcome,
-      betAmountInUnits,
-    ]);
+    // const betAmountInUnits = BigInt(amount) * BigInt(1e6);
+    // const data = opinionMarketContract.interface.encodeFunctionData('bet', [
+    //   BigInt(marketId),
+    //   outcome,
+    //   betAmountInUnits,
+    // ]);
 
-    const unsignedTx = {
-      to: await this.contractsService.getContractAddress('OpinionMarket'),
-      data,
-      value: '0',
-      gasLimit: '400000',
-      description: `Bet ${amount} USDC on ${outcome ? 'YES' : 'NO'} for market ${marketId}`,
-    };
+    // const unsignedTx = {
+    //   to: await this.contractsService.getContractAddress('OpinionMarket'),
+    //   data,
+    //   value: '0',
+    //   gasLimit: '400000',
+    //   description: `Bet ${amount} USDC on ${outcome ? 'YES' : 'NO'} for market ${marketId}`,
+    // };
 
-    return new TradeMarketResponseDto({
-      unsignedTx,
-      expectedShares: priceQuote.expectedShares,
-      marketId,
-      outcome,
-      amount: amount.toString(),
-      currentProbability: priceQuote.currentProbability,
-      newProbability: priceQuote.newProbability,
-    });
+    // return new TradeMarketResponseDto({
+    //   unsignedTx,
+    //   expectedShares: priceQuote.expectedShares,
+    //   marketId,
+    //   outcome,
+    //   amount: amount.toString(),
+    //   currentProbability: priceQuote.currentProbability,
+    //   newProbability: priceQuote.newProbability,
+    // });
   }
 
   /**
@@ -654,7 +668,7 @@ export class MarketsService {
     const { marketId } = claimDto;
 
     const market = await this.opinionMarketRepository.findOne({
-      where: { marketId },
+      where: { marketId: BigInt(marketId) },
     });
 
     if (!market) {
@@ -671,7 +685,7 @@ export class MarketsService {
     // Find user position
     const position = await this.marketPositionRepository.findOne({
       where: {
-        opinionMarket: { marketId },
+        opinionMarket: { marketId: BigInt(marketId) },
         userAddress: userAddress.toLowerCase(),
       },
     });
@@ -703,27 +717,30 @@ export class MarketsService {
       throw new BadRequestException('No winnings to claim');
     }
 
+    // TODO: Implement getOpinionMarketContract and getContractAddress in ContractsService
+    throw new BadRequestException('Claim winnings transaction building not yet implemented - missing contract methods');
+
     // Get OpinionMarket contract
-    const opinionMarketContract = await this.contractsService.getOpinionMarketContract();
+    // const opinionMarketContract = await this.contractsService.getOpinionMarketContract();
 
     // Encode function call: claimWinnings(uint256 marketId)
-    const data = opinionMarketContract.interface.encodeFunctionData('claimWinnings', [BigInt(marketId)]);
+    // const data = opinionMarketContract.interface.encodeFunctionData('claimWinnings', [BigInt(marketId)]);
 
-    const unsignedTx = {
-      to: await this.contractsService.getContractAddress('OpinionMarket'),
-      data,
-      value: '0',
-      gasLimit: '300000',
-      description: `Claim ${this.formatUSDC(winningsAmount)} USDC winnings from market ${marketId}`,
-    };
+    // const unsignedTx = {
+    //   to: await this.contractsService.getContractAddress('OpinionMarket'),
+    //   data,
+    //   value: '0',
+    //   gasLimit: '300000',
+    //   description: `Claim ${this.contractsService.formatUSDC(winningsAmount)} USDC winnings from market ${marketId}`,
+    // };
 
-    return new ClaimWinningsResponseDto({
-      unsignedTx,
-      winnings: this.formatUSDC(winningsAmount),
-      marketId,
-      winningOutcome: marketInfo.winningOutcome,
-      winningShares: this.formatUSDC(winningShares),
-    });
+    // return new ClaimWinningsResponseDto({
+    //   unsignedTx,
+    //   winnings: this.contractsService.formatUSDC(winningsAmount),
+    //   marketId,
+    //   winningOutcome: marketInfo.winningOutcome || undefined,
+    //   winningShares: this.contractsService.formatUSDC(winningShares),
+    // });
   }
 
   /**
@@ -735,7 +752,7 @@ export class MarketsService {
     offset: number = 0,
   ): Promise<MarketActivityDto[]> {
     const market = await this.opinionMarketRepository.findOne({
-      where: { marketId },
+      where: { marketId: BigInt(marketId) },
       relations: ['creator', 'creator.user'],
     });
 
@@ -750,7 +767,7 @@ export class MarketsService {
       activities.push({
         id: `create-${market.marketId}`,
         type: 'CREATED',
-        userAddress: market.creatorAddress,
+        userAddress: market.creatorAddress || undefined,
         userHandle: market.creator.user.twitterHandle,
         description: `Market created: "${market.question}"`,
         timestamp: market.createdAt,
@@ -759,7 +776,7 @@ export class MarketsService {
 
     // Get trades
     const trades = await this.marketTradeRepository.find({
-      where: { opinionMarket: { marketId } },
+      where: { opinionMarket: { marketId: BigInt(marketId) } },
       order: { timestamp: 'DESC' },
       take: limit,
       skip: offset,
@@ -778,10 +795,10 @@ export class MarketsService {
         type: 'TRADE',
         userAddress: trade.userAddress,
         userHandle: user?.twitterHandle,
-        description: `Bet ${this.formatUSDC(amount)} USDC on ${outcomeText}`,
-        amount: this.formatUSDC(amount),
-        outcome: trade.outcome,
-        transactionHash: trade.transactionHash,
+        description: `Bet ${this.contractsService.formatUSDC(amount)} USDC on ${outcomeText}`,
+        amount: this.contractsService.formatUSDC(amount),
+        outcome: trade.outcome === 1,
+        transactionHash: trade.transactionHash || "",
         timestamp: trade.timestamp,
       });
     }
@@ -794,10 +811,10 @@ export class MarketsService {
       activities.push({
         id: `resolved-${market.marketId}`,
         type: 'RESOLVED',
-        userAddress: market.creatorAddress,
+        userAddress: market.creatorAddress || undefined,
         userHandle: market.creator.user.twitterHandle,
         description: `Market resolved: ${outcomeText} won`,
-        outcome: marketInfo.winningOutcome,
+        outcome: marketInfo.winningOutcome || undefined,
         timestamp: new Date(), // In production, get from blockchain event
       });
     }
@@ -806,7 +823,7 @@ export class MarketsService {
       activities.push({
         id: `cancelled-${market.marketId}`,
         type: 'CANCELLED',
-        userAddress: market.creatorAddress,
+        userAddress: market.creatorAddress || undefined,
         userHandle: market.creator.user.twitterHandle,
         description: 'Market cancelled',
         timestamp: new Date(), // In production, get from blockchain event

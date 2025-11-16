@@ -364,6 +364,24 @@ export class TwitterService {
   }
 
   /**
+   * Get user by Twitter handle (alias for getUserByUsername)
+   */
+  async getUserByHandle(handle: string): Promise<TwitterUserDto> {
+    return this.getUserByUsername(handle);
+  }
+
+  /**
+   * Search for potential creators on Twitter
+   * Note: This is a stub - full implementation requires elevated Twitter API access
+   */
+  async searchCreators(query: string, limit: number = 10): Promise<TwitterUserDto[]> {
+    // TODO: Implement when elevated Twitter API access is available
+    // For now, return empty array with a warning
+    this.logger.warn('searchCreators called but not fully implemented - requires elevated Twitter API access');
+    return [];
+  }
+
+  /**
    * Extract tweet ID from URL
    */
   extractTweetId(tweetUrl: string): string | null {

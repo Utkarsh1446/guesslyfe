@@ -268,7 +268,7 @@ export class DividendsService {
       )
       .map((claim) => ({
         id: claim.id,
-        creatorAddress: claim.claimableDividend!.dividendEpoch!.creatorAddress,
+        creatorAddress: claim.claimableDividend!.dividendEpoch!.creatorAddress!,
         epochNumber: claim.claimableDividend!.dividendEpoch!.epochNumber,
         claimer: claim.claimer!,
         claimerHandle: user.twitterHandle,
@@ -276,7 +276,7 @@ export class DividendsService {
         transactionHash: claim.transactionHash!,
         blockNumber: claim.blockNumber || 0,
         claimedAt: claim.claimedAt,
-      }));
+      })) as DividendClaimDto[];
   }
 
   /**

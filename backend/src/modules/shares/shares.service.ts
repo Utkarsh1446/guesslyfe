@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException, BadRequestException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, MoreThan } from 'typeorm';
+import { CreatorStatus } from "../../database/enums";
 import { CreatorShare } from '../../database/entities/creator-share.entity';
 import { ShareTransaction } from '../../database/entities/share-transaction.entity';
 import { Creator } from '../../database/entities/creator.entity';
@@ -160,6 +161,8 @@ export class SharesService {
     const history: ShareHistoryDto[] = [];
 
     for (const tx of transactions) {
+      if (!tx.buyer) continue; // Skip if no buyer
+
       // Try to find user by wallet address
       const user = await this.userRepository.findOne({
         where: { walletAddress: tx.buyer.toLowerCase() },
@@ -171,12 +174,12 @@ export class SharesService {
         trader: tx.buyer,
         traderHandle: user?.twitterHandle,
         shares: this.formatUSDC(BigInt(tx.shares)),
-        pricePerShare: this.formatUSDC(BigInt(tx.pricePerShare)),
+        pricePerShare: this.formatUSDC(BigInt(tx.pricePerShare || 0)),
         totalPrice: this.formatUSDC(BigInt(tx.totalAmount)),
         protocolFee: this.formatUSDC(BigInt(tx.protocolFee)),
         creatorFee: this.formatUSDC(BigInt(tx.creatorFee)),
-        transactionHash: tx.transactionHash,
-        blockNumber: tx.blockNumber,
+        transactionHash: tx.txHash || '',
+        blockNumber: tx.blockNumber || 0,
         timestamp: tx.timestamp,
       });
     }
@@ -192,14 +195,14 @@ export class SharesService {
 
     // Get all creators with their 24h volume
     const creators = await this.creatorRepository.find({
-      where: { status: 'APPROVED' },
-      relations: ['user', 'creatorShare'],
+      where: { status: CreatorStatus.APPROVED },
+      relations: ['user'],
     });
 
     const trending: TrendingShareDto[] = [];
 
     for (const creator of creators) {
-      if (!creator.creatorShare) continue;
+      if (!creator.creatorAddress) continue;
 
       // Calculate 24h volume
       const transactions24h = await this.shareTransactionRepository.find({
