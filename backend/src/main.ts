@@ -7,10 +7,9 @@ import { ValidationPipe, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { getQueueToken } from '@nestjs/bull';
-// Bull Board imports - Install packages: npm install @bull-board/api @bull-board/express
-// import { ExpressAdapter } from '@bull-board/express';
-// import { BullAdapter } from '@bull-board/api/bullAdapter';
-// import { createBullBoard } from '@bull-board/api';
+import { ExpressAdapter } from '@bull-board/express';
+import { BullAdapter } from '@bull-board/api/bullAdapter';
+import { createBullBoard } from '@bull-board/api';
 import helmet from 'helmet';
 import compression from 'compression';
 import cookieParser from 'cookie-parser';
@@ -96,8 +95,6 @@ async function bootstrap() {
   }
 
   // Bull Board - Queue Monitoring Dashboard
-  // Uncomment after installing: npm install @bull-board/api @bull-board/express
-  /*
   try {
     const serverAdapter = new ExpressAdapter();
     serverAdapter.setBasePath('/admin/queues');
@@ -128,7 +125,6 @@ async function bootstrap() {
   } catch (error) {
     logger.error(`Failed to setup Bull Board: ${error.message}`);
   }
-  */
 
   // Start Server
   const port = configService.get<number>('app.port') || 3000;
