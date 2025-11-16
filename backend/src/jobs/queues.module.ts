@@ -21,12 +21,14 @@ import { Creator } from '../database/entities/creator.entity';
 import { DividendEpoch } from '../database/entities/dividend-epoch.entity';
 import { ShareTransaction } from '../database/entities/share-transaction.entity';
 import { MarketTrade } from '../database/entities/market-trade.entity';
+import { OpinionMarket } from '../database/entities/opinion-market.entity';
 
 // Services (will be injected into processors)
 import { DividendsModule } from '../modules/dividends/dividends.module';
 import { TwitterModule } from '../modules/twitter/twitter.module';
 import { MarketsModule } from '../modules/markets/markets.module';
 import { CreatorsModule } from '../modules/creators/creators.module';
+import { ContractsModule } from '../contracts/contracts.module';
 
 @Module({
   imports: [
@@ -36,6 +38,7 @@ import { CreatorsModule } from '../modules/creators/creators.module';
       DividendEpoch,
       ShareTransaction,
       MarketTrade,
+      OpinionMarket,
     ]),
 
     // Schedule module for cron jobs (already registered globally in AppModule)
@@ -93,11 +96,12 @@ import { CreatorsModule } from '../modules/creators/creators.module';
       },
     ),
 
-    // Import required modules for processors
+    // Import required modules for processors and scheduled tasks
     DividendsModule,
     TwitterModule,
     MarketsModule,
     CreatorsModule,
+    ContractsModule,
   ],
   providers: [
     // Job Processors

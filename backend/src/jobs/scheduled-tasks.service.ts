@@ -8,8 +8,10 @@ import { Creator } from '../database/entities/creator.entity';
 import { DividendEpoch } from '../database/entities/dividend-epoch.entity';
 import { ShareTransaction } from '../database/entities/share-transaction.entity';
 import { MarketTrade } from '../database/entities/market-trade.entity';
+import { OpinionMarket } from '../database/entities/opinion-market.entity';
 import { QUEUE_NAMES, JOB_TYPES } from './queue.constants';
 import { CreatorStatus } from '../database/enums';
+import { CreatorShareFactoryService } from '../contracts/creator-share-factory.service';
 
 @Injectable()
 export class ScheduledTasksService {
@@ -18,6 +20,7 @@ export class ScheduledTasksService {
   private readonly SHARE_FEE_BPS = 250; // 2.5%
   private readonly MARKET_FEE_BPS = 15; // 0.15%
   private readonly FEE_PRECISION = 10000;
+  private readonly VOLUME_THRESHOLD = 30000; // $30,000 USDC
 
   constructor(
     @InjectRepository(Creator)
@@ -28,14 +31,19 @@ export class ScheduledTasksService {
     private readonly shareTransactionRepository: Repository<ShareTransaction>,
     @InjectRepository(MarketTrade)
     private readonly marketTradeRepository: Repository<MarketTrade>,
+    @InjectRepository(OpinionMarket)
+    private readonly opinionMarketRepository: Repository<OpinionMarket>,
     @InjectQueue(QUEUE_NAMES.EPOCH_FINALIZER)
     private readonly epochQueue: Queue,
     @InjectQueue(QUEUE_NAMES.DIVIDEND_CALCULATOR)
     private readonly dividendQueue: Queue,
     @InjectQueue(QUEUE_NAMES.NOTIFICATION)
     private readonly notificationQueue: Queue,
+    @InjectQueue(QUEUE_NAMES.VOLUME_TRACKER)
+    private readonly volumeTrackerQueue: Queue,
     private readonly dataSource: DataSource,
     private readonly schedulerRegistry: SchedulerRegistry,
+    private readonly creatorShareFactoryService: CreatorShareFactoryService,
   ) {}
 
   /**
@@ -466,11 +474,369 @@ export class ScheduledTasksService {
   }
 
   /**
+   * Hourly Volume Tracking Job
+   * Runs every hour to track creator volumes and unlock shares
+   * Cron: '0 * * * *' (minute hour day month dayOfWeek)
+   */
+  @Cron('0 * * * *', {
+    name: 'track-creator-volumes',
+    timeZone: 'UTC',
+  })
+  async trackCreatorVolumes() {
+    const startTime = Date.now();
+    const jobName = 'Creator Volume Tracking';
+
+    this.logger.log(`========================================`);
+    this.logger.log(`Starting ${jobName} at ${new Date().toISOString()}`);
+    this.logger.log(`========================================`);
+
+    try {
+      // Execute volume tracking
+      await this.executeVolumeTracking();
+
+      const executionTime = Date.now() - startTime;
+      this.logger.log(`${jobName} completed successfully in ${executionTime}ms`);
+
+      // Alert if execution took too long (>2 minutes warning threshold)
+      if (executionTime > 2 * 60 * 1000) {
+        this.logger.warn(`⚠️  ${jobName} took ${executionTime}ms - consider optimization`);
+        await this.sendAlert({
+          type: 'warning',
+          message: `${jobName} took ${executionTime}ms`,
+          threshold: '2 minutes',
+        });
+      }
+
+    } catch (error) {
+      const executionTime = Date.now() - startTime;
+      this.logger.error(
+        `❌ ${jobName} FAILED after ${executionTime}ms: ${error.message}`,
+        error.stack,
+      );
+
+      // Send critical alert
+      await this.sendAlert({
+        type: 'critical',
+        message: `${jobName} failed: ${error.message}`,
+        stack: error.stack,
+        executionTime,
+      });
+
+      // Re-throw to mark job as failed
+      throw error;
+    }
+  }
+
+  /**
+   * Execute the complete volume tracking workflow
+   */
+  private async executeVolumeTracking(): Promise<void> {
+    // Get all approved creators
+    const allCreators = await this.creatorRepository.find({
+      where: {
+        status: CreatorStatus.APPROVED,
+      },
+    });
+
+    this.logger.log(`Found ${allCreators.length} approved creators`);
+
+    if (allCreators.length === 0) {
+      this.logger.log('No creators to process. Exiting.');
+      return;
+    }
+
+    const results = {
+      total: allCreators.length,
+      volumeUpdated: 0,
+      sharesUnlocked: 0,
+      failed: 0,
+      skipped: 0,
+      errors: [] as any[],
+    };
+
+    // Separate creators by unlock status
+    const lockedCreators = allCreators.filter(c => !c.sharesUnlocked);
+    const unlockedCreators = allCreators.filter(c => c.sharesUnlocked);
+
+    this.logger.log(`  Locked creators: ${lockedCreators.length}`);
+    this.logger.log(`  Unlocked creators: ${unlockedCreators.length}`);
+
+    // Process locked creators (check for unlock)
+    for (const creator of lockedCreators) {
+      try {
+        const unlocked = await this.processLockedCreator(creator);
+        if (unlocked) {
+          results.sharesUnlocked++;
+        }
+        results.volumeUpdated++;
+      } catch (error) {
+        results.failed++;
+        results.errors.push({
+          creatorId: creator.id,
+          handle: creator.twitterHandle,
+          error: error.message,
+        });
+        this.logger.error(
+          `Failed to process locked creator ${creator.twitterHandle}: ${error.message}`,
+        );
+      }
+    }
+
+    // Process unlocked creators (update volume)
+    for (const creator of unlockedCreators) {
+      try {
+        await this.processUnlockedCreator(creator);
+        results.volumeUpdated++;
+      } catch (error) {
+        results.failed++;
+        results.errors.push({
+          creatorId: creator.id,
+          handle: creator.twitterHandle,
+          error: error.message,
+        });
+        this.logger.error(
+          `Failed to process unlocked creator ${creator.twitterHandle}: ${error.message}`,
+        );
+      }
+    }
+
+    // Log summary
+    this.logger.log(`========================================`);
+    this.logger.log(`Volume Tracking Summary:`);
+    this.logger.log(`  Total Creators: ${results.total}`);
+    this.logger.log(`  📊 Volume Updated: ${results.volumeUpdated}`);
+    this.logger.log(`  🔓 Shares Unlocked: ${results.sharesUnlocked}`);
+    this.logger.log(`  ❌ Failed: ${results.failed}`);
+    if (results.failed > 0) {
+      this.logger.error(`  Errors:`, JSON.stringify(results.errors, null, 2));
+    }
+    this.logger.log(`========================================`);
+  }
+
+  /**
+   * Process a creator whose shares are locked (check for unlock)
+   */
+  private async processLockedCreator(creator: Creator): Promise<boolean> {
+    this.logger.log(`Processing locked creator: ${creator.twitterHandle} (${creator.id})`);
+
+    // Calculate total volume from all markets
+    const totalVolume = await this.calculateCreatorVolume(creator.id);
+
+    // Update totalMarketVolume
+    creator.totalMarketVolume = totalVolume;
+    await this.creatorRepository.save(creator);
+
+    this.logger.log(
+      `Updated volume for ${creator.twitterHandle}: $${totalVolume.toFixed(2)} USDC`
+    );
+
+    // Check if threshold reached ($30,000)
+    if (totalVolume >= this.VOLUME_THRESHOLD) {
+      this.logger.log(
+        `🎉 Volume threshold reached for ${creator.twitterHandle}! Unlocking shares...`
+      );
+
+      // Unlock shares
+      await this.unlockCreatorShares(creator, totalVolume);
+      return true;
+    } else {
+      const remaining = this.VOLUME_THRESHOLD - totalVolume;
+      this.logger.log(
+        `${creator.twitterHandle} needs $${remaining.toFixed(2)} more to unlock shares`
+      );
+      return false;
+    }
+  }
+
+  /**
+   * Process a creator whose shares are already unlocked (update volume)
+   */
+  private async processUnlockedCreator(creator: Creator): Promise<void> {
+    this.logger.log(`Updating volume for unlocked creator: ${creator.twitterHandle}`);
+
+    // Calculate total volume from all markets
+    const totalVolume = await this.calculateCreatorVolume(creator.id);
+
+    // Update totalMarketVolume
+    creator.totalMarketVolume = totalVolume;
+    await this.creatorRepository.save(creator);
+
+    this.logger.log(
+      `Updated volume for ${creator.twitterHandle}: $${totalVolume.toFixed(2)} USDC`
+    );
+
+    // Queue job to report volume to contract (if creator has wallet address)
+    if (creator.creatorAddress) {
+      await this.volumeTrackerQueue.add(
+        JOB_TYPES.VOLUME_TRACKER.UPDATE_CREATOR_VOLUME,
+        {
+          creatorId: creator.id,
+          creatorAddress: creator.creatorAddress,
+          volume: totalVolume,
+        },
+        {
+          priority: 2,
+          delay: 1000,
+        },
+      );
+    }
+  }
+
+  /**
+   * Calculate total volume across all creator's markets
+   */
+  private async calculateCreatorVolume(creatorId: string): Promise<number> {
+    const result = await this.opinionMarketRepository
+      .createQueryBuilder('market')
+      .select('COALESCE(SUM(market.volume), 0)', 'total')
+      .where('market.creatorId = :creatorId', { creatorId })
+      .getRawOne();
+
+    return Number(result?.total || 0);
+  }
+
+  /**
+   * Unlock shares for a creator when threshold is reached
+   */
+  private async unlockCreatorShares(creator: Creator, totalVolume: number): Promise<void> {
+    const queryRunner = this.dataSource.createQueryRunner();
+    await queryRunner.connect();
+    await queryRunner.startTransaction();
+
+    try {
+      // Update creator record
+      creator.sharesUnlocked = true;
+      creator.sharesUnlockedAt = new Date();
+      creator.totalMarketVolume = totalVolume;
+
+      await queryRunner.manager.save(Creator, creator);
+
+      // Verify on blockchain if creator has wallet address
+      if (creator.creatorAddress) {
+        try {
+          const isUnlockedOnChain = await this.creatorShareFactoryService.checkSharesUnlocked(
+            creator.creatorAddress
+          );
+
+          this.logger.log(
+            `Blockchain verification for ${creator.twitterHandle}: ${isUnlockedOnChain ? 'UNLOCKED' : 'LOCKED'}`
+          );
+
+          if (!isUnlockedOnChain) {
+            this.logger.warn(
+              `⚠️  Database shows unlocked but blockchain shows locked for ${creator.twitterHandle}. ` +
+              `This may be expected if contract hasn't been updated yet.`
+            );
+
+            // Send alert about sync issue
+            await this.sendAlert({
+              type: 'warning',
+              message: `Blockchain sync mismatch for ${creator.twitterHandle}`,
+              creatorId: creator.id,
+              dbStatus: 'unlocked',
+              blockchainStatus: 'locked',
+              volume: totalVolume,
+            });
+          }
+        } catch (error) {
+          this.logger.error(
+            `Failed to verify blockchain status for ${creator.twitterHandle}: ${error.message}`
+          );
+
+          // Send alert but don't fail the unlock
+          await this.sendAlert({
+            type: 'warning',
+            message: `Failed blockchain verification for ${creator.twitterHandle}: ${error.message}`,
+            creatorId: creator.id,
+          });
+        }
+      }
+
+      await queryRunner.commitTransaction();
+
+      this.logger.log(
+        `✅ Shares unlocked for ${creator.twitterHandle} at volume $${totalVolume.toFixed(2)} USDC`
+      );
+
+      // Send notification to creator
+      await this.notifySharesUnlocked(creator, totalVolume);
+
+      // Queue volume update job to report to contract
+      if (creator.creatorAddress) {
+        await this.volumeTrackerQueue.add(
+          JOB_TYPES.VOLUME_TRACKER.UPDATE_CREATOR_VOLUME,
+          {
+            creatorId: creator.id,
+            creatorAddress: creator.creatorAddress,
+            volume: totalVolume,
+            justUnlocked: true,
+          },
+          {
+            priority: 1, // High priority for unlock
+            delay: 2000,
+          },
+        );
+      }
+
+    } catch (error) {
+      await queryRunner.rollbackTransaction();
+      this.logger.error(
+        `Error unlocking shares for ${creator.twitterHandle}: ${error.message}`,
+        error.stack,
+      );
+      throw error;
+    } finally {
+      await queryRunner.release();
+    }
+  }
+
+  /**
+   * Send notification to creator about shares being unlocked
+   */
+  private async notifySharesUnlocked(
+    creator: Creator,
+    totalVolume: number,
+  ): Promise<void> {
+    this.logger.log(`Sending unlock notification to ${creator.twitterHandle}`);
+
+    // Queue notification job
+    await this.notificationQueue.add(
+      JOB_TYPES.NOTIFICATION.SEND_EMAIL,
+      {
+        type: 'email',
+        recipient: creator.creatorAddress || creator.twitterHandle,
+        subject: `🎉 Your Creator Shares Are Now Unlocked!`,
+        body: `Congratulations! Your creator shares have been unlocked after reaching $${totalVolume.toFixed(2)} USDC in total market volume. You can now start earning dividends from trading fees!`,
+        data: {
+          creatorId: creator.id,
+          creatorHandle: creator.twitterHandle,
+          totalVolume,
+          threshold: this.VOLUME_THRESHOLD,
+          unlockedAt: new Date().toISOString(),
+        },
+      },
+      {
+        priority: 1, // High priority
+        delay: 3000,
+      },
+    );
+  }
+
+  /**
    * Manual trigger for testing
    * Can be called via API endpoint
    */
   async triggerManualFinalization(): Promise<any> {
     this.logger.log('🔧 Manual epoch finalization triggered');
     return await this.finalizeDailyEpochs();
+  }
+
+  /**
+   * Manual trigger for volume tracking
+   * Can be called via API endpoint
+   */
+  async triggerManualVolumeTracking(): Promise<any> {
+    this.logger.log('🔧 Manual volume tracking triggered');
+    return await this.trackCreatorVolumes();
   }
 }
