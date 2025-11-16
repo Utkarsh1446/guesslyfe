@@ -66,6 +66,27 @@ export class UsersController {
   }
 
   /**
+   * Search users by handle or display name
+   */
+  @Get('search')
+  @UseGuards(OptionalAuthGuard)
+  @ApiOperation({ summary: 'Search users by Twitter handle or display name' })
+  @ApiQuery({ name: 'q', required: true, type: String, description: 'Search query (min 2 characters)' })
+  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Max results (default: 20, max: 50)' })
+  @ApiResponse({
+    status: 200,
+    description: 'Search results',
+    type: [UserResponseDto],
+  })
+  @ApiResponse({ status: 400, description: 'Invalid search query' })
+  async searchUsers(
+    @Query('q') query: string,
+    @Query('limit', new DefaultValuePipe(20), ParseIntPipe) limit: number,
+  ): Promise<UserResponseDto[]> {
+    return this.usersService.searchUsers(query, Math.min(limit, 50));
+  }
+
+  /**
    * Get user by ID
    */
   @Get('id/:id')

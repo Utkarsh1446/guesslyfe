@@ -96,6 +96,57 @@ export class UsersService {
   }
 
   /**
+   * Get user by Twitter ID
+   */
+  async getUserByTwitterId(twitterId: string): Promise<UserResponseDto> {
+    const user = await this.userRepository.findOne({
+      where: { twitterId },
+      relations: ['creator'],
+    });
+
+    if (!user) {
+      throw new NotFoundException(`User with Twitter ID ${twitterId} not found`);
+    }
+
+    return this.getUserById(user.id);
+  }
+
+  /**
+   * Search users by Twitter handle or display name
+   */
+  async searchUsers(query: string, limit: number = 20): Promise<UserResponseDto[]> {
+    if (!query || query.trim().length < 2) {
+      throw new BadRequestException('Search query must be at least 2 characters');
+    }
+
+    const searchQuery = query.trim().toLowerCase();
+
+    // Search by Twitter handle or display name using ILIKE for case-insensitive search
+    const users = await this.userRepository
+      .createQueryBuilder('user')
+      .leftJoinAndSelect('user.creator', 'creator')
+      .where('LOWER(user.twitterHandle) LIKE :query', { query: `%${searchQuery}%` })
+      .orWhere('LOWER(user.displayName) LIKE :query', { query: `%${searchQuery}%` })
+      .orderBy('user.twitterFollowers', 'DESC') // Most followed first
+      .take(limit)
+      .getMany();
+
+    return users.map(user => new UserResponseDto({
+      id: user.id,
+      twitterId: user.twitterId,
+      twitterHandle: user.twitterHandle,
+      displayName: user.displayName,
+      bio: user.bio,
+      profilePictureUrl: user.profilePictureUrl,
+      walletAddress: user.walletAddress,
+      isCreator: !!user.creator,
+      twitterFollowers: user.twitterFollowers,
+      createdAt: user.createdAt,
+      updatedAt: user.updatedAt,
+    }));
+  }
+
+  /**
    * Update user profile
    */
   async updateUser(userId: string, updateDto: UpdateUserDto): Promise<UserResponseDto> {
