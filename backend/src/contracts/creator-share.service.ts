@@ -227,7 +227,7 @@ export class CreatorShareService {
 
           const totalSupply = await contract.totalSupply();
 
-          callbacks.onSharesPurchased({
+          callbacks.onSharesPurchased?.({
             buyer,
             amount,
             cost,
@@ -246,7 +246,7 @@ export class CreatorShareService {
 
           const totalSupply = await contract.totalSupply();
 
-          callbacks.onSharesSold({
+          callbacks.onSharesSold?.({
             seller,
             amount,
             cost: payout,
@@ -262,7 +262,7 @@ export class CreatorShareService {
       if (callbacks.onDividendClaimed) {
         contract.on('DividendsClaimed', (user, amount, epochId, timestamp) => {
           this.logger.log(`DividendsClaimed: ${user} claimed ${amount} for epoch ${epochId}`);
-          callbacks.onDividendClaimed(user, amount, epochId);
+          callbacks.onDividendClaimed?.(user, amount, epochId);
         });
       }
 
@@ -270,7 +270,7 @@ export class CreatorShareService {
       if (callbacks.onFeesWithdrawn) {
         contract.on('FeesWithdrawn', (recipient, amount) => {
           this.logger.log(`FeesWithdrawn: ${recipient} withdrew ${amount}`);
-          callbacks.onFeesWithdrawn(recipient, amount);
+          callbacks.onFeesWithdrawn?.(recipient, amount);
         });
       }
 

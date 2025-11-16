@@ -62,9 +62,9 @@ export class AuthService {
    */
   async exchangeCodeForToken(code: string, codeVerifier: string): Promise<TwitterTokens> {
     const tokenUrl = 'https://api.twitter.com/2/oauth2/token';
-    const clientId = this.configService.get<string>('twitter.clientId');
-    const clientSecret = this.configService.get<string>('twitter.clientSecret');
-    const redirectUri = this.configService.get<string>('twitter.callbackUrl');
+    const clientId = this.configService.get<string>('twitter.clientId') || '';
+    const clientSecret = this.configService.get<string>('twitter.clientSecret') || '';
+    const redirectUri = this.configService.get<string>('twitter.callbackUrl') || '';
 
     const params = new URLSearchParams({
       code,

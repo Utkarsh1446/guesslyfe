@@ -247,7 +247,7 @@ export class OpinionMarketService {
       if (callbacks.onMarketCreated) {
         contract.on('MarketCreated', (marketId, creator, question, endTime, timestamp) => {
           this.logger.log(`MarketCreated: ${marketId} by ${creator} - "${question}"`);
-          callbacks.onMarketCreated(marketId, creator, question, endTime);
+          callbacks.onMarketCreated?.(marketId, creator, question, endTime);
         });
       }
 
@@ -255,7 +255,7 @@ export class OpinionMarketService {
       if (callbacks.onBetPlaced) {
         contract.on('BetPlaced', (marketId, user, isYes, amount, cost, timestamp) => {
           this.logger.log(`BetPlaced: Market ${marketId}, User ${user}, ${isYes ? 'YES' : 'NO'}, Amount ${amount}`);
-          callbacks.onBetPlaced(marketId, user, isYes, amount, cost);
+          callbacks.onBetPlaced?.(marketId, user, isYes, amount, cost);
         });
       }
 
@@ -263,7 +263,7 @@ export class OpinionMarketService {
       if (callbacks.onMarketResolved) {
         contract.on('MarketResolved', (marketId, winningOutcome, timestamp) => {
           this.logger.log(`MarketResolved: ${marketId} -> ${winningOutcome ? 'YES' : 'NO'}`);
-          callbacks.onMarketResolved(marketId, winningOutcome, timestamp);
+          callbacks.onMarketResolved?.(marketId, winningOutcome, timestamp);
         });
       }
 
@@ -271,7 +271,7 @@ export class OpinionMarketService {
       if (callbacks.onWinningsClaimed) {
         contract.on('WinningsClaimed', (marketId, user, payout, timestamp) => {
           this.logger.log(`WinningsClaimed: Market ${marketId}, User ${user}, Payout ${payout}`);
-          callbacks.onWinningsClaimed(marketId, user, payout);
+          callbacks.onWinningsClaimed?.(marketId, user, payout);
         });
       }
 
