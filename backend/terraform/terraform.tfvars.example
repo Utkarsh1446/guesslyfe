@@ -1,0 +1,54 @@
+# ==============================================================================
+# Terraform Variables Example
+# ==============================================================================
+#
+# Copy this file to terraform.tfvars and fill in your values:
+#   cp terraform.tfvars.example terraform.tfvars
+#
+# ==============================================================================
+
+# ==============================================================================
+# Required Variables
+# ==============================================================================
+
+# GCP Project ID
+project_id = "your-gcp-project-id"
+
+# Container image (build and push to Artifact Registry first)
+container_image = "us-central1-docker.pkg.dev/your-project-id/guessly/guessly-api:latest"
+
+# Database password (use a strong random password)
+db_password = "your-secure-database-password"
+
+# ==============================================================================
+# Optional Variables (with defaults)
+# ==============================================================================
+
+# GCP region
+region = "us-central1"
+
+# Environment
+environment = "production"
+
+# Cloud Run Configuration
+min_instances = 1
+max_instances = 10
+cpu           = "2"
+memory        = "2Gi"
+request_timeout = 300
+concurrency   = 80
+
+# Cloud SQL Configuration
+db_tier                    = "db-custom-2-7680"  # 2 vCPU, 7.68 GB RAM
+enable_deletion_protection = true
+
+# Redis Configuration
+redis_tier           = "STANDARD_HA"  # High availability
+redis_memory_size_gb = 1
+
+# Labels
+labels = {
+  app        = "guessly"
+  managed_by = "terraform"
+  environment = "production"
+}

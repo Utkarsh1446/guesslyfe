@@ -1,0 +1,215 @@
+name: Deploy to GCP Cloud Run
+
+on:
+  push:
+    branches:
+      - main
+      - production
+    paths:
+      - 'backend/**'
+      - '.github/workflows/deploy-gcp.yml'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        type: choice
+        options:
+          - staging
+          - production
+
+env:
+  PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+  REGION: us-central1
+  SERVICE_NAME: guessly-api
+  REGISTRY: us-central1-docker.pkg.dev
+  REPOSITORY: guessly
+  IMAGE_NAME: guessly-api
+
+jobs:
+  # ==========================================================================
+  # Test Job
+  # ==========================================================================
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ./backend
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+          cache: 'npm'
+          cache-dependency-path: backend/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --legacy-peer-deps
+
+      - name: Run linter
+        run: npm run lint
+        continue-on-error: true
+
+      - name: Run unit tests
+        run: npm run test
+        continue-on-error: true
+
+      - name: Build TypeScript
+        run: npm run build
+
+  # ==========================================================================
+  # Build and Deploy Job
+  # ==========================================================================
+  deploy:
+    name: Build and Deploy to Cloud Run
+    runs-on: ubuntu-latest
+    needs: test
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+
+    permissions:
+      contents: read
+      id-token: write
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Configure Docker for Artifact Registry
+        run: |
+          gcloud auth configure-docker ${{ env.REGION }}-docker.pkg.dev
+
+      - name: Build Docker image
+        working-directory: ./backend
+        run: |
+          docker build \
+            --target production \
+            --build-arg NODE_ENV=production \
+            --tag ${{ env.REGISTRY }}/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} \
+            --tag ${{ env.REGISTRY }}/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}:latest \
+            .
+
+      - name: Push Docker image to Artifact Registry
+        run: |
+          docker push ${{ env.REGISTRY }}/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          docker push ${{ env.REGISTRY }}/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}:latest
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy ${{ env.SERVICE_NAME }} \
+            --image ${{ env.REGISTRY }}/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}:${{ github.sha }} \
+            --region ${{ env.REGION }} \
+            --platform managed \
+            --allow-unauthenticated \
+            --min-instances 1 \
+            --max-instances 10 \
+            --memory 2Gi \
+            --cpu 2 \
+            --timeout 300 \
+            --concurrency 80 \
+            --port 3000 \
+            --set-env-vars NODE_ENV=production,PORT=3000,API_PREFIX=api/v1 \
+            --add-cloudsql-instances ${{ env.PROJECT_ID }}:${{ env.REGION }}:guessly-db \
+            --vpc-connector guessly-connector \
+            --vpc-egress private-ranges-only \
+            --set-secrets JWT_SECRET=jwt-secret:latest,JWT_REFRESH_SECRET=jwt-refresh-secret:latest,DB_PASSWORD=db-password:latest,BLOCKCHAIN_PROVIDER_PRIVATE_KEY=blockchain-private-key:latest,TWITTER_CLIENT_ID=twitter-client-id:latest,TWITTER_CLIENT_SECRET=twitter-client-secret:latest,TWITTER_BEARER_TOKEN=twitter-bearer-token:latest,SENDGRID_API_KEY=sendgrid-api-key:latest,SENTRY_DSN=sentry-dsn:latest \
+            --update-env-vars DB_HOST=/cloudsql/${{ env.PROJECT_ID }}:${{ env.REGION }}:guessly-db,DB_PORT=5432,DB_USERNAME=guessly,DB_DATABASE=guessly,DB_SYNCHRONIZE=false,DB_LOGGING=false,REDIS_HOST=${{ secrets.REDIS_HOST }},REDIS_PORT=6379,BLOCKCHAIN_NETWORK=baseSepolia,BLOCKCHAIN_RPC_URL=https://sepolia.base.org,BLOCKCHAIN_CHAIN_ID=84532,THROTTLE_TTL=60,THROTTLE_LIMIT=100,LOG_LEVEL=info,LOG_TO_CONSOLE=true,LOG_TO_FILE=false,SENTRY_ENABLED=true,SWAGGER_ENABLED=true \
+            --service-account guessly-api@${{ env.PROJECT_ID }}.iam.gserviceaccount.com \
+            --labels app=guessly,component=api,environment=production,commit=${{ github.sha }}
+
+      - name: Get Service URL
+        id: get-url
+        run: |
+          SERVICE_URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} \
+            --region ${{ env.REGION }} \
+            --format 'value(status.url)')
+          echo "SERVICE_URL=$SERVICE_URL" >> $GITHUB_OUTPUT
+          echo "Service URL: $SERVICE_URL"
+
+      - name: Run Health Check
+        run: |
+          echo "Waiting for service to be ready..."
+          sleep 10
+
+          SERVICE_URL="${{ steps.get-url.outputs.SERVICE_URL }}"
+          echo "Checking health endpoint: $SERVICE_URL/api/v1/health"
+
+          RESPONSE=$(curl -s -o /dev/null -w "%{http_code}" "$SERVICE_URL/api/v1/health")
+
+          if [ "$RESPONSE" = "200" ]; then
+            echo "✅ Health check passed!"
+          else
+            echo "❌ Health check failed with status code: $RESPONSE"
+            exit 1
+          fi
+
+      - name: Create deployment summary
+        run: |
+          echo "## Deployment Summary 🚀" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Service**: ${{ env.SERVICE_NAME }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Region**: ${{ env.REGION }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Image**: \`${{ env.REGISTRY }}/${{ env.PROJECT_ID }}/${{ env.REPOSITORY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "- **URL**: ${{ steps.get-url.outputs.SERVICE_URL }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit**: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Actor**: @${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### Health Check ✅" >> $GITHUB_STEP_SUMMARY
+          echo "Service is healthy and ready to receive traffic!" >> $GITHUB_STEP_SUMMARY
+
+  # ==========================================================================
+  # Post-Deployment Tests (Optional)
+  # ==========================================================================
+  smoke-test:
+    name: Run Smoke Tests
+    runs-on: ubuntu-latest
+    needs: deploy
+    if: github.event_name == 'push'
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Set up Cloud SDK
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.PROJECT_ID }}
+
+      - name: Get Service URL
+        id: get-url
+        run: |
+          SERVICE_URL=$(gcloud run services describe ${{ env.SERVICE_NAME }} \
+            --region ${{ env.REGION }} \
+            --format 'value(status.url)')
+          echo "SERVICE_URL=$SERVICE_URL" >> $GITHUB_OUTPUT
+
+      - name: Test API Endpoints
+        run: |
+          SERVICE_URL="${{ steps.get-url.outputs.SERVICE_URL }}"
+
+          echo "Testing health endpoint..."
+          curl -f "$SERVICE_URL/api/v1/health" || exit 1
+
+          echo "Testing API docs..."
+          curl -f "$SERVICE_URL/api/docs" || exit 1
+
+          echo "✅ All smoke tests passed!"

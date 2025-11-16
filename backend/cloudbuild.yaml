@@ -1,46 +1,168 @@
+# ==============================================================================
+# Google Cloud Build Configuration
+# ==============================================================================
+#
+# This file defines the build and deployment pipeline for Cloud Run.
+# Triggered automatically when code is pushed to the repository.
+#
+# Prerequisites:
+# - Enable Cloud Build API
+# - Enable Cloud Run API
+# - Enable Secret Manager API
+# - Configure Cloud Build service account with necessary permissions
+# - Store secrets in Secret Manager
+#
+# Manual trigger:
+#   gcloud builds submit --config cloudbuild.yaml
+#
+# ==============================================================================
+
+options:
+  # Use faster machine type for builds
+  machineType: 'E2_HIGHCPU_8'
+  # Increase timeout for builds
+  timeout: '1200s'  # 20 minutes
+  # Enable kaniko cache for faster builds
+  substitutionOption: 'ALLOW_LOOSE'
+  # Logging
+  logging: CLOUD_LOGGING_ONLY
+
+# Substitution variables
+substitutions:
+  _PROJECT_ID: 'your-project-id'
+  _REGION: 'us-central1'
+  _SERVICE_NAME: 'guessly-api'
+  _ARTIFACT_REGISTRY: 'us-central1-docker.pkg.dev'
+  _REPOSITORY: 'guessly'
+  _IMAGE_NAME: 'guessly-api'
+  _MIN_INSTANCES: '1'
+  _MAX_INSTANCES: '10'
+  _MEMORY: '2Gi'
+  _CPU: '2'
+  _TIMEOUT: '300'
+  _CONCURRENCY: '80'
+
+# Build steps
 steps:
-  # Build the container image
+  # ===========================================================================
+  # Step 1: Build Docker image
+  # ===========================================================================
   - name: 'gcr.io/cloud-builders/docker'
+    id: 'build-image'
     args:
       - 'build'
-      - '-t'
-      - 'gcr.io/$PROJECT_ID/guessly-backend:$COMMIT_SHA'
-      - '-t'
-      - 'gcr.io/$PROJECT_ID/guessly-backend:latest'
+      - '--target=production'
+      - '--build-arg=NODE_ENV=production'
+      - '--cache-from=${_ARTIFACT_REGISTRY}/${PROJECT_ID}/${_REPOSITORY}/${_IMAGE_NAME}:latest'
+      - '--tag=${_ARTIFACT_REGISTRY}/${PROJECT_ID}/${_REPOSITORY}/${_IMAGE_NAME}:${SHORT_SHA}'
+      - '--tag=${_ARTIFACT_REGISTRY}/${PROJECT_ID}/${_REPOSITORY}/${_IMAGE_NAME}:latest'
+      - '--tag=${_ARTIFACT_REGISTRY}/${PROJECT_ID}/${_REPOSITORY}/${_IMAGE_NAME}:${BRANCH_NAME}'
       - '.'
-    dir: 'backend'
+    timeout: '600s'
 
-  # Push the container image to Container Registry
+  # ===========================================================================
+  # Step 2: Push Docker image to Artifact Registry
+  # ===========================================================================
   - name: 'gcr.io/cloud-builders/docker'
+    id: 'push-image'
     args:
       - 'push'
-      - 'gcr.io/$PROJECT_ID/guessly-backend:$COMMIT_SHA'
+      - '--all-tags'
+      - '${_ARTIFACT_REGISTRY}/${PROJECT_ID}/${_REPOSITORY}/${_IMAGE_NAME}'
+    waitFor:
+      - 'build-image'
 
-  - name: 'gcr.io/cloud-builders/docker'
-    args:
-      - 'push'
-      - 'gcr.io/$PROJECT_ID/guessly-backend:latest'
-
-  # Deploy container image to Cloud Run
+  # ===========================================================================
+  # Step 3: Deploy to Cloud Run
+  # ===========================================================================
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: 'deploy-cloud-run'
     entrypoint: gcloud
     args:
       - 'run'
       - 'deploy'
-      - 'guessly-backend'
-      - '--image'
-      - 'gcr.io/$PROJECT_ID/guessly-backend:$COMMIT_SHA'
-      - '--region'
-      - 'us-central1'
-      - '--platform'
-      - 'managed'
+      - '${_SERVICE_NAME}'
+      - '--image=${_ARTIFACT_REGISTRY}/${PROJECT_ID}/${_REPOSITORY}/${_IMAGE_NAME}:${SHORT_SHA}'
+      - '--region=${_REGION}'
+      - '--platform=managed'
       - '--allow-unauthenticated'
-      - '--set-env-vars'
-      - 'NODE_ENV=production'
+      - '--min-instances=${_MIN_INSTANCES}'
+      - '--max-instances=${_MAX_INSTANCES}'
+      - '--memory=${_MEMORY}'
+      - '--cpu=${_CPU}'
+      - '--timeout=${_TIMEOUT}'
+      - '--concurrency=${_CONCURRENCY}'
+      - '--port=3000'
+      - '--set-env-vars=NODE_ENV=production,PORT=3000,API_PREFIX=api/v1'
+      # Cloud SQL Connection
+      - '--add-cloudsql-instances=${PROJECT_ID}:${_REGION}:guessly-db'
+      # VPC Connector for Redis
+      - '--vpc-connector=guessly-connector'
+      - '--vpc-egress=private-ranges-only'
+      # Secrets from Secret Manager
+      - '--set-secrets=JWT_SECRET=jwt-secret:latest,JWT_REFRESH_SECRET=jwt-refresh-secret:latest,DB_PASSWORD=db-password:latest,BLOCKCHAIN_PROVIDER_PRIVATE_KEY=blockchain-private-key:latest,TWITTER_CLIENT_ID=twitter-client-id:latest,TWITTER_CLIENT_SECRET=twitter-client-secret:latest,TWITTER_BEARER_TOKEN=twitter-bearer-token:latest,SENDGRID_API_KEY=sendgrid-api-key:latest,SENTRY_DSN=sentry-dsn:latest'
+      # Regular environment variables
+      - '--update-env-vars=DB_HOST=/cloudsql/${PROJECT_ID}:${_REGION}:guessly-db,DB_PORT=5432,DB_USERNAME=guessly,DB_DATABASE=guessly,DB_SYNCHRONIZE=false,DB_LOGGING=false,REDIS_HOST=10.0.0.3,REDIS_PORT=6379,BLOCKCHAIN_NETWORK=baseSepolia,BLOCKCHAIN_RPC_URL=https://sepolia.base.org,BLOCKCHAIN_CHAIN_ID=84532,THROTTLE_TTL=60,THROTTLE_LIMIT=100,LOG_LEVEL=info,LOG_TO_CONSOLE=true,LOG_TO_FILE=false,SENTRY_ENABLED=true,SWAGGER_ENABLED=true'
+      # Service account
+      - '--service-account=guessly-api@${PROJECT_ID}.iam.gserviceaccount.com'
+      # Labels
+      - '--labels=app=guessly,component=api,environment=production'
+    waitFor:
+      - 'push-image'
 
+  # ===========================================================================
+  # Step 4: Run Database Migrations
+  # ===========================================================================
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    id: 'run-migrations'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'jobs'
+      - 'execute'
+      - 'guessly-migrations'
+      - '--region=${_REGION}'
+      - '--wait'
+    waitFor:
+      - 'deploy-cloud-run'
+    # Continue even if migrations fail (first deployment might not have migrations job)
+    allowFailure: true
+
+  # ===========================================================================
+  # Step 5: Health Check
+  # ===========================================================================
+  - name: 'gcr.io/cloud-builders/curl'
+    id: 'health-check'
+    entrypoint: 'bash'
+    args:
+      - '-c'
+      - |
+        # Get the service URL
+        SERVICE_URL=$(gcloud run services describe ${_SERVICE_NAME} \
+          --region=${_REGION} \
+          --format='value(status.url)')
+
+        # Wait for service to be ready
+        echo "Waiting for service to be ready..."
+        sleep 10
+
+        # Health check
+        echo "Checking health endpoint: $SERVICE_URL/api/v1/health"
+        curl -f -s "$SERVICE_URL/api/v1/health" || exit 1
+
+        echo "Health check passed!"
+    waitFor:
+      - 'deploy-cloud-run'
+
+# Images to store in Artifact Registry
 images:
-  - 'gcr.io/$PROJECT_ID/guessly-backend:$COMMIT_SHA'
-  - 'gcr.io/$PROJECT_ID/guessly-backend:latest'
+  - '${_ARTIFACT_REGISTRY}/${PROJECT_ID}/${_REPOSITORY}/${_IMAGE_NAME}:${SHORT_SHA}'
+  - '${_ARTIFACT_REGISTRY}/${PROJECT_ID}/${_REPOSITORY}/${_IMAGE_NAME}:latest'
+  - '${_ARTIFACT_REGISTRY}/${PROJECT_ID}/${_REPOSITORY}/${_IMAGE_NAME}:${BRANCH_NAME}'
 
-options:
-  logging: CLOUD_LOGGING_ONLY
+# Artifacts to store
+artifacts:
+  objects:
+    location: 'gs://${PROJECT_ID}_cloudbuild/builds/${BUILD_ID}'
+    paths:
+      - 'dist/**'
