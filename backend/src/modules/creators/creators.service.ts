@@ -3,6 +3,7 @@ import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Creator } from '../../database/entities/creator.entity';
 import { User } from '../../database/entities/user.entity';
+import { CreatorStatus } from '../../database/enums';
 import { ShareTransaction } from '../../database/entities/share-transaction.entity';
 import { OpinionMarket } from '../../database/entities/opinion-market.entity';
 import { MarketTrade } from '../../database/entities/market-trade.entity';
@@ -82,12 +83,12 @@ export class CreatorsService {
       bio: createDto.bio,
       profilePictureUrl: createDto.profilePictureUrl || user.profilePictureUrl,
       websiteUrl: createDto.websiteUrl,
-      status: 'PENDING',
+      status: CreatorStatus.PENDING,
     });
 
     await this.creatorRepository.save(creator);
 
-    return this.getCreatorByAddress(creator.creatorAddress);
+    return this.getCreatorByAddress(createDto.creatorAddress.toLowerCase());
   }
 
   /**
@@ -206,7 +207,7 @@ export class CreatorsService {
       throw new NotFoundException(`Creator with address ${creatorAddress} not found`);
     }
 
-    creator.status = 'APPROVED';
+    creator.status = CreatorStatus.APPROVED;
     await this.creatorRepository.save(creator);
 
     return this.buildCreatorResponse(creator);
@@ -230,7 +231,7 @@ export class CreatorsService {
       throw new NotFoundException(`Creator with address ${creatorAddress} not found`);
     }
 
-    creator.status = 'REJECTED';
+    creator.status = CreatorStatus.REJECTED;
     await this.creatorRepository.save(creator);
 
     return this.buildCreatorResponse(creator);
@@ -277,11 +278,11 @@ export class CreatorsService {
     return {
       creatorAddress,
       shareContractAddress: shareContract,
-      currentSupply: supply.supplyFormatted,
+      currentSupply: supply.toString(),
       shareholderCount: parseInt(shareholderCount.count) || 0,
       buyPriceForOne: buyPrice.priceFormatted,
       sellPriceForOne: sellPrice.priceFormatted,
-      totalVolume: volumeInfo.currentVolumeFormatted,
+      totalVolume: volumeInfo.volumeFormatted,
       isUnlocked: volumeInfo.isUnlocked,
     };
   }
@@ -304,7 +305,7 @@ export class CreatorsService {
 
     // Get all share transactions
     const transactions = await this.shareTransactionRepository.find({
-      where: { creatorShare: { creatorAddress: creatorAddress.toLowerCase() } },
+      where: { creator: { creatorAddress: creatorAddress.toLowerCase() } },
       order: { timestamp: 'DESC' },
     });
 
@@ -312,6 +313,7 @@ export class CreatorsService {
     const holdingsMap = new Map<string, bigint>();
 
     for (const tx of transactions) {
+      if (!tx.buyer) continue; // Skip transactions without buyer
       const currentHolding = holdingsMap.get(tx.buyer) || BigInt(0);
       if (tx.transactionType === 'BUY') {
         holdingsMap.set(tx.buyer, currentHolding + BigInt(tx.shares));
@@ -322,7 +324,7 @@ export class CreatorsService {
 
     // Get total supply for percentage calculation
     const supply = await this.creatorShareService.getCurrentSupply(creatorAddress);
-    const totalSupply = BigInt(supply.supply);
+    const totalSupply = supply;
 
     // Build shareholder list
     const shareholders: ShareholderDto[] = [];
@@ -383,6 +385,9 @@ export class CreatorsService {
     const marketDtos: CreatorMarketDto[] = [];
 
     for (const market of markets) {
+      // Skip markets without marketId
+      if (!market.marketId) continue;
+
       // Get on-chain market info
       const marketInfo = await this.opinionMarketService.getMarketInfo(BigInt(market.marketId));
       const probabilities = await this.opinionMarketService.getOutcomeProbabilities(
@@ -415,13 +420,13 @@ export class CreatorsService {
       marketDtos.push({
         marketId: market.marketId.toString(),
         question: market.question,
-        description: market.description,
+        description: market.description || '',
         endTime: market.endTime,
         liquidityPool: this.formatUSDC(BigInt(marketInfo.liquidityPool)),
         yesProbability: probabilities.yesProbability,
         noProbability: probabilities.noProbability,
         status: marketStatus,
-        winningOutcome: marketInfo.resolved ? marketInfo.winningOutcome : undefined,
+        winningOutcome: marketInfo.resolved && marketInfo.winningOutcome !== null ? marketInfo.winningOutcome : undefined,
         totalVolume: this.formatUSDC(BigInt(totalVolume.total || '0')),
         participantCount: parseInt(participantCount.count) || 0,
         createdAt: market.createdAt,
@@ -455,13 +460,13 @@ export class CreatorsService {
         tier: null,
         requirements: {
           minFollowers: 1000,
-          minAge: 90,
-          verified: false,
+          minPosts: 10,
+          minEngagementRate: 1.0,
         },
         current: {
           followers: user.twitterFollowers || 0,
-          accountAge: 0,
-          verified: false,
+          posts: 0,
+          engagementRate: 0,
         },
         reason: 'User is already a creator',
       };
@@ -486,13 +491,13 @@ export class CreatorsService {
       tier,
       requirements: {
         minFollowers: 1000,
-        minAge: 90,
-        verified: false,
+        minPosts: 10,
+        minEngagementRate: 1.0,
       },
       current: {
         followers,
-        accountAge: 0,
-        verified: false,
+        posts: 0,
+        engagementRate: 0,
       },
       reason: eligible ? undefined : 'Minimum 1000 followers required',
     };
@@ -521,19 +526,29 @@ export class CreatorsService {
 
     // Calculate volume per market
     const marketVolumes = await Promise.all(
-      markets.map(async (market) => {
-        const totalVolume = await this.marketTradeRepository
-          .createQueryBuilder('trade')
-          .select('SUM(trade.amount)', 'total')
-          .where('trade.opinionMarketMarketId = :marketId', { marketId: market.marketId })
-          .getRawOne();
+      markets
+        .filter(market => market.marketId !== null)
+        .map(async (market) => {
+          const totalVolume = await this.marketTradeRepository
+            .createQueryBuilder('trade')
+            .select('SUM(trade.amount)', 'total')
+            .where('trade.opinionMarketMarketId = :marketId', { marketId: market.marketId })
+            .getRawOne();
 
-        return {
-          marketId: market.marketId.toString(),
-          question: market.question,
-          volume: this.formatUSDC(BigInt(totalVolume.total || '0')),
-        };
-      }),
+          const marketStatus = market.isResolved
+            ? 'RESOLVED'
+            : market.cancelled
+            ? 'CANCELLED'
+            : 'ACTIVE';
+
+          return {
+            marketId: market.marketId!.toString(),
+            question: market.question,
+            volume: this.formatUSDC(BigInt(totalVolume.total || '0')),
+            status: marketStatus,
+            createdAt: market.createdAt,
+          };
+        }),
     );
 
     const currentVolume = BigInt(volumeInfo.currentVolume);
@@ -545,7 +560,7 @@ export class CreatorsService {
 
     return {
       creatorAddress,
-      totalVolume: volumeInfo.currentVolumeFormatted,
+      totalVolume: volumeInfo.volumeFormatted,
       threshold: volumeInfo.thresholdFormatted,
       progress,
       remaining: this.formatUSDC(remaining),
@@ -583,25 +598,28 @@ export class CreatorsService {
     const volumeInfo = await this.creatorShareFactoryService.getVolumeInfo(creatorAddress);
     if (!volumeInfo.isUnlocked) {
       throw new ForbiddenException(
-        `Shares not unlocked. Current volume: ${volumeInfo.currentVolumeFormatted}, Required: ${volumeInfo.thresholdFormatted}`,
+        `Shares not unlocked. Current volume: ${volumeInfo.volumeFormatted}, Required: ${volumeInfo.thresholdFormatted}`,
       );
     }
 
     // Deploy share contract via factory
-    try {
-      const result = await this.creatorShareFactoryService.createCreatorShares(creatorAddress);
+    // TODO: Implement createCreatorShares method in CreatorShareFactoryService
+    throw new BadRequestException('Share contract creation not yet implemented');
 
-      return {
-        shareContractAddress: result.shareContractAddress,
-        txHash: result.transactionHash,
-        creatorAddress,
-        blockNumber: result.blockNumber,
-        success: true,
-        message: 'Share contract successfully deployed',
-      };
-    } catch (error) {
-      throw new BadRequestException(`Failed to create share contract: ${error.message}`);
-    }
+    // try {
+    //   const result = await this.creatorShareFactoryService.createCreatorShares(creatorAddress);
+    //
+    //   return {
+    //     shareContractAddress: result.shareContractAddress,
+    //     txHash: result.transactionHash,
+    //     creatorAddress,
+    //     blockNumber: result.blockNumber,
+    //     success: true,
+    //     message: 'Share contract successfully deployed',
+    //   };
+    // } catch (error) {
+    //   throw new BadRequestException(`Failed to create share contract: ${error.message}`);
+    // }
   }
 
   /**
@@ -629,6 +647,7 @@ export class CreatorsService {
 
     // Analyze each market
     for (const market of markets) {
+      if (!market.marketId) continue; // Skip markets without marketId
       const marketInfo = await this.opinionMarketService.getMarketInfo(BigInt(market.marketId));
 
       if (marketInfo.resolved) {
@@ -648,7 +667,7 @@ export class CreatorsService {
 
       // Count unique participants
       const participants = await this.marketTradeRepository.find({
-        where: { opinionMarket: { marketId: market.marketId } },
+        where: { marketId: market.id },
         select: ['userAddress'],
       });
 
@@ -672,7 +691,7 @@ export class CreatorsService {
 
     // Share fees: Get all share transactions
     const shareTransactions = await this.shareTransactionRepository.find({
-      where: { creatorShare: { creatorAddress: creatorAddress.toLowerCase() } },
+      where: { creator: { creatorAddress: creatorAddress.toLowerCase() } },
     });
 
     for (const tx of shareTransactions) {
@@ -689,7 +708,7 @@ export class CreatorsService {
       const shareContract = await this.creatorShareFactoryService.getShareContract(creatorAddress);
       if (shareContract) {
         const supply = await this.creatorShareService.getCurrentSupply(creatorAddress);
-        totalSharesIssued = supply.supplyFormatted;
+        totalSharesIssued = supply.toString();
 
         const shareholderCount = await this.shareTransactionRepository
           .createQueryBuilder('tx')
@@ -731,19 +750,21 @@ export class CreatorsService {
     let sharesUnlocked = false;
 
     try {
-      const shareContract = await this.creatorShareFactoryService.getShareContract(
-        creator.creatorAddress,
-      );
-      shareContractAddress = shareContract;
-
-      if (shareContract) {
-        const volumeInfo = await this.creatorShareFactoryService.getVolumeInfo(
+      if (creator.creatorAddress) {
+        const shareContract = await this.creatorShareFactoryService.getShareContract(
           creator.creatorAddress,
         );
-        currentVolume = volumeInfo.currentVolumeFormatted;
-        volumeThreshold = volumeInfo.thresholdFormatted;
-        remainingVolume = volumeInfo.remainingVolumeFormatted;
-        sharesUnlocked = volumeInfo.isUnlocked;
+        shareContractAddress = shareContract;
+
+        if (shareContract) {
+          const volumeInfo = await this.creatorShareFactoryService.getVolumeInfo(
+            creator.creatorAddress,
+          );
+          currentVolume = volumeInfo.volumeFormatted;
+          volumeThreshold = volumeInfo.thresholdFormatted;
+          remainingVolume = volumeInfo.remainingFormatted;
+          sharesUnlocked = volumeInfo.isUnlocked;
+        }
       }
     } catch (error) {
       // Creator shares might not be created yet
@@ -751,19 +772,19 @@ export class CreatorsService {
 
     return new CreatorResponseDto({
       id: creator.id,
-      creatorAddress: creator.creatorAddress,
+      creatorAddress: creator.creatorAddress || '',
       twitterHandle: creator.user.twitterHandle,
       displayName: creator.user.displayName,
-      bio: creator.bio,
-      profilePictureUrl: creator.profilePictureUrl,
-      websiteUrl: creator.websiteUrl,
+      bio: creator.bio || undefined,
+      profilePictureUrl: creator.profilePictureUrl || '',
+      websiteUrl: creator.websiteUrl || undefined,
       twitterFollowers: creator.user.twitterFollowers,
       shareContractAddress,
       sharesUnlocked,
       currentVolume,
       volumeThreshold,
       remainingVolume,
-      status: creator.status,
+      status: creator.status as 'PENDING' | 'APPROVED' | 'REJECTED',
       createdAt: creator.createdAt,
       updatedAt: creator.updatedAt,
     });

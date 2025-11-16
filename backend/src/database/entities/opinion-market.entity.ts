@@ -28,8 +28,17 @@ export class OpinionMarket {
   @Column({ type: 'uuid', nullable: false })
   creatorId: string;
 
+  @Column({ type: 'bigint', nullable: true })
+  marketId: bigint | null;
+
+  @Column({ type: 'varchar', nullable: true })
+  creatorAddress: string | null;
+
   @Column({ type: 'varchar', nullable: false })
   title: string;
+
+  @Column({ type: 'varchar', nullable: false })
+  question: string;
 
   @Column({ type: 'text', nullable: true })
   description: string | null;
@@ -56,6 +65,12 @@ export class OpinionMarket {
     default: MarketStatus.ACTIVE,
   })
   status: MarketStatus;
+
+  @Column({ type: 'boolean', default: false })
+  cancelled: boolean;
+
+  @Column({ type: 'boolean', default: false })
+  isResolved: boolean;
 
   @Column({ type: 'decimal', precision: 18, scale: 6, default: 0 })
   volume: number;
@@ -89,10 +104,10 @@ export class OpinionMarket {
   @JoinColumn({ name: 'creatorId' })
   creator: Creator;
 
-  @OneToMany(() => MarketPosition, (position) => position.market)
+  @OneToMany(() => MarketPosition, (position) => position.opinionMarket)
   positions: MarketPosition[];
 
-  @OneToMany(() => MarketTrade, (trade) => trade.market)
+  @OneToMany(() => MarketTrade, (trade) => trade.opinionMarket)
   trades: MarketTrade[];
 
   @OneToMany(() => CreatorVolumeTracking, (tracking) => tracking.market)

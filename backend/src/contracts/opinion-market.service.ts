@@ -8,10 +8,13 @@ export interface MarketInfo {
   question: string;
   endTime: bigint;
   totalLiquidity: bigint;
+  liquidityPool: bigint;
   liquidityFormatted: string;
   yesShares: bigint;
   noShares: bigint;
   isResolved: boolean;
+  resolved: boolean;
+  cancelled: boolean;
   winningOutcome: boolean | null;
   shareContractAddress: string;
 }
@@ -56,10 +59,13 @@ export class OpinionMarketService {
         question: market.question,
         endTime: market.endTime,
         totalLiquidity: market.totalLiquidity,
+        liquidityPool: market.totalLiquidity,
         liquidityFormatted: this.contractsService.formatUSDC(market.totalLiquidity),
         yesShares: market.yesShares,
         noShares: market.noShares,
         isResolved: market.isResolved,
+        resolved: market.isResolved,
+        cancelled: market.cancelled || false,
         winningOutcome: market.isResolved ? market.winningOutcome : null,
         shareContractAddress: market.shareContract,
       };

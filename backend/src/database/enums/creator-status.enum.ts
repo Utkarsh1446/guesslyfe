@@ -1,5 +1,7 @@
 export enum CreatorStatus {
-  PENDING = 'pending',
+  PENDING = 'PENDING',
+  APPROVED = 'APPROVED',
+  REJECTED = 'REJECTED',
   ACTIVE = 'active',
   SUSPENDED = 'suspended',
 }

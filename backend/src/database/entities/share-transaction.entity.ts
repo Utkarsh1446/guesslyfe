@@ -33,7 +33,13 @@ export class ShareTransaction {
   buyerAddress: string | null;
 
   @Column({ type: 'varchar', nullable: true })
+  buyer: string | null;
+
+  @Column({ type: 'varchar', nullable: true })
   sellerAddress: string | null;
+
+  @Column({ type: 'varchar', nullable: true })
+  seller: string | null;
 
   @Column({ type: 'integer', nullable: false })
   shares: number;
@@ -46,6 +52,12 @@ export class ShareTransaction {
 
   @Column({ type: 'decimal', precision: 18, scale: 6, default: 0 })
   fees: number;
+
+  @Column({ type: 'decimal', precision: 18, scale: 6, default: 0 })
+  protocolFee: number;
+
+  @Column({ type: 'decimal', precision: 18, scale: 6, default: 0 })
+  creatorFee: number;
 
   @Column({ type: 'varchar', unique: true, nullable: true })
   txHash: string | null;

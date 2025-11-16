@@ -99,7 +99,7 @@ export class DividendsService {
         hoursRemaining: 168,
         isFinalized: false,
         accumulatedDividends: '0',
-        totalShares: supply.supplyFormatted,
+        totalShares: supply.toString(),
       });
     }
 
@@ -136,7 +136,7 @@ export class DividendsService {
       accumulatedDividends: this.formatUSDC(BigInt(currentEpoch.totalDividends)),
       totalShares: currentEpoch.isFinalized
         ? this.formatUSDC(BigInt(currentEpoch.totalSharesAtSnapshot))
-        : supply.supplyFormatted,
+        : supply.toString(),
       previousEpoch,
     });
   }

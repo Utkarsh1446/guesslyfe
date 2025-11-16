@@ -40,6 +40,9 @@ export class MarketTrade {
   @Column({ type: 'decimal', precision: 18, scale: 6, nullable: false })
   shares: number;
 
+  @Column({ type: 'decimal', precision: 18, scale: 6, default: 0 })
+  sharesPurchased: number;
+
   @Column({ type: 'decimal', precision: 18, scale: 6, nullable: true })
   price: number | null;
 
@@ -49,11 +52,14 @@ export class MarketTrade {
   @Column({ type: 'varchar', unique: true, nullable: true })
   txHash: string | null;
 
+  @Column({ type: 'varchar', nullable: true })
+  transactionHash: string | null;
+
   @Column({ type: 'timestamp', nullable: false })
   timestamp: Date;
 
   // Relationships
   @ManyToOne(() => OpinionMarket, (market) => market.trades)
   @JoinColumn({ name: 'marketId' })
-  market: OpinionMarket;
+  opinionMarket: OpinionMarket;
 }
