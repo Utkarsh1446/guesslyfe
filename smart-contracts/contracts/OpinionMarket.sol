@@ -52,8 +52,9 @@ contract OpinionMarket is Ownable, ReentrancyGuard {
     /// @notice Maximum number of outcomes
     uint256 public constant MAX_OUTCOMES = 4;
 
-    /// @notice Initial liquidity per outcome for AMM
-    uint256 public constant INITIAL_LIQUIDITY = 1000e6; // 1000 USDC per outcome
+    /// @notice Virtual liquidity per outcome for AMM bootstrapping (5000 USDC per outcome)
+    /// @dev This is used for price calculation only and is not withdrawable
+    uint256 public constant VIRTUAL_LIQUIDITY_PER_OUTCOME = 5000e6;
 
     /// @notice Market counter for unique IDs
     uint256 public nextMarketId;
@@ -246,7 +247,7 @@ contract OpinionMarket is Ownable, ReentrancyGuard {
         market.createdAt = block.timestamp;
 
         // Initialize AMM reserves (starting at 0, will grow with bets)
-        // Note: INITIAL_LIQUIDITY constant exists for future AMM enhancements
+        // Virtual liquidity is used for price calculation only (see VIRTUAL_LIQUIDITY_PER_OUTCOME)
         for (uint256 i = 0; i < outcomes.length; i++) {
             outcomeReserves[marketId][i] = 0;
         }
@@ -434,15 +435,17 @@ contract OpinionMarket is Ownable, ReentrancyGuard {
         Market storage market = markets[marketId];
         if (outcome >= market.outcomes.length) revert InvalidOutcome();
 
-        uint256 totalReserves = 0;
+        // Calculate total effective reserves (real + virtual)
+        uint256 totalEffectiveReserves = 0;
         for (uint256 i = 0; i < market.outcomes.length; i++) {
-            totalReserves += outcomeReserves[marketId][i];
+            totalEffectiveReserves += outcomeReserves[marketId][i] + VIRTUAL_LIQUIDITY_PER_OUTCOME;
         }
 
-        if (totalReserves == 0) return 0;
+        // Calculate effective reserve for the outcome
+        uint256 outcomeEffectiveReserve = outcomeReserves[marketId][outcome] + VIRTUAL_LIQUIDITY_PER_OUTCOME;
 
-        // Probability = (outcome reserve / total reserves) * 10000
-        probability = (outcomeReserves[marketId][outcome] * BPS_DENOMINATOR) / totalReserves;
+        // Probability = (effective outcome reserve / total effective reserves) * 10000
+        probability = (outcomeEffectiveReserve * BPS_DENOMINATOR) / totalEffectiveReserves;
     }
 
     /**
@@ -455,21 +458,34 @@ contract OpinionMarket is Ownable, ReentrancyGuard {
     }
 
     /**
-     * @notice Calculate shares for a bet amount using AMM formula
+     * @notice Calculate shares for a bet amount using AMM formula with virtual liquidity
      * @param marketId Market ID
      * @param outcome Outcome index
      * @param amount Amount to bet (after fees)
      * @return shares Number of shares
+     * @dev Uses constant-product AMM with virtual liquidity bootstrapping
+     *      shares = amount / price, where price = effective_reserve / total_effective_reserves
      */
     function calculateShares(
         uint256 marketId,
         uint256 outcome,
         uint256 amount
     ) public view returns (uint256 shares) {
-        // Simplified AMM: shares proportional to amount
-        // In a more complex AMM, this would use LMSR or constant product formula
-        // For simplicity: shares = amount (1:1 ratio)
-        shares = amount;
+        Market storage market = markets[marketId];
+
+        // Calculate total effective reserves across all outcomes
+        uint256 totalEffectiveReserves = 0;
+        for (uint256 i = 0; i < market.outcomes.length; i++) {
+            totalEffectiveReserves += outcomeReserves[marketId][i] + VIRTUAL_LIQUIDITY_PER_OUTCOME;
+        }
+
+        // Calculate effective reserve for the chosen outcome
+        uint256 outcomeEffectiveReserve = outcomeReserves[marketId][outcome] + VIRTUAL_LIQUIDITY_PER_OUTCOME;
+
+        // Price of this outcome = effective_reserve / total_effective_reserves
+        // shares = amount / price = (amount * total_effective_reserves) / effective_reserve
+        // This ensures more shares when outcome is less likely (lower reserve/price)
+        shares = (amount * totalEffectiveReserves) / outcomeEffectiveReserve;
     }
 
     /**
