@@ -36,6 +36,18 @@ export class Creator {
   @Column({ type: 'varchar', nullable: false })
   twitterHandle: string;
 
+  @Column({ type: 'varchar', nullable: true, unique: true })
+  creatorAddress: string | null;
+
+  @Column({ type: 'varchar', nullable: true })
+  profilePictureUrl: string | null;
+
+  @Column({ type: 'text', nullable: true })
+  bio: string | null;
+
+  @Column({ type: 'varchar', nullable: true })
+  websiteUrl: string | null;
+
   @Column({ type: 'integer', default: 0 })
   followerCount: number;
 

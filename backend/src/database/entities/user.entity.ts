@@ -41,6 +41,15 @@ export class User {
   @Column({ type: 'integer', default: 0 })
   followingCount: number;
 
+  @Column({ type: 'integer', default: 0 })
+  twitterFollowers: number;
+
+  @Column({ type: 'text', nullable: true })
+  twitterAccessToken: string | null;
+
+  @Column({ type: 'text', nullable: true })
+  twitterRefreshToken: string | null;
+
   @Column({ type: 'varchar', nullable: true })
   email: string | null;
 

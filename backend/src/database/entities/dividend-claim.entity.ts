@@ -7,6 +7,8 @@ import {
   JoinColumn,
 } from 'typeorm';
 import { Creator } from './creator.entity';
+import { User } from './user.entity';
+import { ClaimableDividend } from './claimable-dividend.entity';
 
 @Entity('dividend_claims')
 @Index(['userAddress'])
@@ -19,8 +21,14 @@ export class DividendClaim {
   @Column({ type: 'varchar', nullable: false })
   userAddress: string;
 
+  @Column({ type: 'varchar', nullable: true })
+  claimer: string | null;
+
   @Column({ type: 'uuid', nullable: false })
   creatorId: string;
+
+  @Column({ type: 'uuid', nullable: true })
+  claimableDividendId: string | null;
 
   @Column({ type: 'decimal', precision: 18, scale: 6, nullable: false })
   amount: number;
@@ -37,6 +45,12 @@ export class DividendClaim {
   @Column({ type: 'varchar', unique: true, nullable: true })
   txHash: string | null;
 
+  @Column({ type: 'varchar', nullable: true })
+  transactionHash: string | null;
+
+  @Column({ type: 'integer', nullable: true })
+  blockNumber: number | null;
+
   @Column({ type: 'timestamp', nullable: false })
   claimedAt: Date;
 
@@ -44,4 +58,8 @@ export class DividendClaim {
   @ManyToOne(() => Creator, (creator) => creator.dividendClaims)
   @JoinColumn({ name: 'creatorId' })
   creator: Creator;
+
+  @ManyToOne(() => ClaimableDividend, { nullable: true })
+  @JoinColumn({ name: 'claimableDividendId' })
+  claimableDividend: ClaimableDividend | null;
 }

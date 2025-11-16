@@ -20,6 +20,9 @@ export class DividendEpoch {
   @Column({ type: 'uuid', nullable: false })
   creatorId: string;
 
+  @Column({ type: 'varchar', nullable: true })
+  creatorAddress: string | null;
+
   @Column({ type: 'integer', nullable: false })
   epochNumber: number;
 
@@ -38,11 +41,23 @@ export class DividendEpoch {
   @Column({ type: 'decimal', precision: 18, scale: 6, default: 0 })
   totalFees: number;
 
+  @Column({ type: 'decimal', precision: 18, scale: 6, default: 0 })
+  totalDividends: number;
+
+  @Column({ type: 'decimal', precision: 18, scale: 6, default: 0 })
+  totalSharesAtSnapshot: number;
+
   @Column({ type: 'boolean', default: false })
   distributed: boolean;
 
   @Column({ type: 'timestamp', nullable: true })
   distributedAt: Date | null;
+
+  @Column({ type: 'boolean', default: false })
+  isFinalized: boolean;
+
+  @Column({ type: 'timestamp', nullable: true })
+  finalizedAt: Date | null;
 
   @CreateDateColumn({ type: 'timestamp' })
   createdAt: Date;
