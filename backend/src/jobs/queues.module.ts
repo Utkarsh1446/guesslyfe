@@ -19,6 +19,8 @@ import { ScheduledTasksService } from './scheduled-tasks.service';
 // Entities
 import { Creator } from '../database/entities/creator.entity';
 import { DividendEpoch } from '../database/entities/dividend-epoch.entity';
+import { ClaimableDividend } from '../database/entities/claimable-dividend.entity';
+import { CreatorVolumeTracking } from '../database/entities/creator-volume-tracking.entity';
 import { ShareTransaction } from '../database/entities/share-transaction.entity';
 import { MarketTrade } from '../database/entities/market-trade.entity';
 import { OpinionMarket } from '../database/entities/opinion-market.entity';
@@ -38,6 +40,8 @@ import { ContractsModule } from '../contracts/contracts.module';
     TypeOrmModule.forFeature([
       Creator,
       DividendEpoch,
+      ClaimableDividend,
+      CreatorVolumeTracking,
       ShareTransaction,
       MarketTrade,
       OpinionMarket,

@@ -6,8 +6,10 @@ import {
   MemoryHealthIndicator,
   DiskHealthIndicator,
 } from '@nestjs/terminus';
+import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { Public } from '../../common/decorators';
 
+@ApiTags('Health')
 @Controller('health')
 export class HealthController {
   constructor(
@@ -20,6 +22,35 @@ export class HealthController {
   @Get()
   @Public()
   @HealthCheck()
+  @ApiOperation({
+    summary: 'Health check',
+    description: 'Checks system health including database, memory, and disk usage',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'System health status',
+    schema: {
+      type: 'object',
+      properties: {
+        status: { type: 'string', example: 'ok' },
+        info: {
+          type: 'object',
+          properties: {
+            database: { type: 'object', properties: { status: { type: 'string', example: 'up' } } },
+            memory_heap: { type: 'object', properties: { status: { type: 'string', example: 'up' } } },
+            memory_rss: { type: 'object', properties: { status: { type: 'string', example: 'up' } } },
+            storage: { type: 'object', properties: { status: { type: 'string', example: 'up' } } },
+          },
+        },
+        error: { type: 'object' },
+        details: { type: 'object' },
+      },
+    },
+  })
+  @ApiResponse({
+    status: 503,
+    description: 'Service unavailable - health check failed',
+  })
   check() {
     return this.health.check([
       // Database health check
