@@ -22,6 +22,8 @@ import { AllExceptionsFilter } from './common/filters/http-exception.filter';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
 import { PerformanceInterceptor } from './common/interceptors/performance.interceptor';
 import { RequestLoggerMiddleware } from './common/middleware/request-logger.middleware';
+import { SanitizationPipe } from './common/pipes/sanitization.pipe';
+import { helmetConfig, getAppCorsConfig } from './common/config/security.config';
 import { QUEUE_NAMES } from './jobs/queue.constants';
 import { adminAuthMiddleware } from './jobs/guards/admin-auth.guard';
 
@@ -34,8 +36,8 @@ async function bootstrap() {
 
   const configService = app.get(ConfigService);
 
-  // Security: Helmet
-  app.use(helmet());
+  // Security: Helmet (with enhanced configuration)
+  app.use(helmet(helmetConfig));
 
   // Cookie Parser
   app.use(cookieParser());
@@ -43,20 +45,16 @@ async function bootstrap() {
   // Compression
   app.use(compression());
 
-  // CORS Configuration
-  app.enableCors({
-    origin: configService.get<string>('app.corsOrigin'),
-    credentials: configService.get<boolean>('app.corsCredentials'),
-    methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
-  });
+  // CORS Configuration (environment-aware)
+  app.enableCors(getAppCorsConfig());
 
   // Global API Prefix
   const apiPrefix = configService.get<string>('app.apiPrefix') || 'api/v1';
   app.setGlobalPrefix(apiPrefix);
 
-  // Global Validation Pipe
+  // Global Validation and Sanitization Pipes
   app.useGlobalPipes(
+    new SanitizationPipe(), // Sanitize input first
     new ValidationPipe({
       whitelist: true, // Strip properties that don't have decorators
       forbidNonWhitelisted: true, // Throw error if non-whitelisted properties are present
@@ -64,6 +62,7 @@ async function bootstrap() {
       transformOptions: {
         enableImplicitConversion: true, // Convert types automatically
       },
+      disableErrorMessages: configService.get<string>('app.nodeEnv') === 'production' ? true : false,
     }),
   );
 

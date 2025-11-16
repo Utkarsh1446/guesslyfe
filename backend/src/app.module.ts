@@ -2,11 +2,12 @@ import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModule, TypeOrmModuleOptions } from '@nestjs/typeorm';
 import { BullModule } from '@nestjs/bull';
-import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
+import { ThrottlerModule } from '@nestjs/throttler';
 import { EventEmitterModule } from '@nestjs/event-emitter';
 import { ScheduleModule } from '@nestjs/schedule';
 import { RedisModule } from '@nestjs-modules/ioredis';
 import { APP_GUARD } from '@nestjs/core';
+import { Reflector } from '@nestjs/core';
 import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { HealthModule } from './modules/health/health.module';
@@ -19,6 +20,7 @@ import { DividendsModule } from './modules/dividends/dividends.module';
 import { TwitterModule } from './modules/twitter/twitter.module';
 import { ContractsModule } from './contracts/contracts.module';
 import { QueuesModule } from './jobs/queues.module';
+import { CustomThrottlerGuard } from './common/guards/throttler.guard';
 
 // Configuration imports
 import appConfig from './config/app.config';
@@ -27,6 +29,7 @@ import redisConfig from './config/redis.config';
 import blockchainConfig from './config/blockchain.config';
 import jwtConfig, { jwtRefreshConfig } from './config/jwt.config';
 import twitterConfig from './config/twitter.config';
+import { throttlerConfig } from './common/config/throttler.config';
 
 @Module({
   imports: [
@@ -68,19 +71,8 @@ import twitterConfig from './config/twitter.config';
       }),
     }),
 
-    // Rate Limiting Module
-    ThrottlerModule.forRootAsync({
-      imports: [ConfigModule],
-      inject: [ConfigService],
-      useFactory: (configService: ConfigService) => ({
-        throttlers: [
-          {
-            ttl: (configService.get<number>('app.throttleTtl') || 60) * 1000, // Convert to milliseconds
-            limit: configService.get<number>('app.throttleLimit') || 100,
-          },
-        ],
-      }),
-    }),
+    // Rate Limiting Module (with custom configuration)
+    ThrottlerModule.forRoot(throttlerConfig),
 
     // Redis Module (standalone for sessions)
     RedisModule.forRootAsync({
@@ -115,9 +107,10 @@ import twitterConfig from './config/twitter.config';
   controllers: [AppController],
   providers: [
     AppService,
+    Reflector,
     {
       provide: APP_GUARD,
-      useClass: ThrottlerGuard,
+      useClass: CustomThrottlerGuard,
     },
   ],
 })
