@@ -535,4 +535,181 @@ describe("OpinionMarket", function () {
       expect(volume).to.equal(toUsdc(300));
     });
   });
+
+  describe("Virtual Liquidity Bootstrapping", function () {
+    it("Should have correct virtual liquidity constant", async function () {
+      const virtualLiquidity = await opinionMarket.VIRTUAL_LIQUIDITY_PER_OUTCOME();
+      expect(virtualLiquidity).to.equal(toUsdc(5000)); // 5000 USDC per outcome
+    });
+
+    it("Should start binary market at 50/50 probability", async function () {
+      const outcomes = ["Yes", "No"];
+      await opinionMarket
+        .connect(creator)
+        .createMarket("Test Market", outcomes, ONE_DAY, "Description");
+
+      const yesProb = await opinionMarket.getOutcomeProbability(1, 0);
+      const noProb = await opinionMarket.getOutcomeProbability(1, 1);
+
+      expect(yesProb).to.equal(5000); // 50%
+      expect(noProb).to.equal(5000); // 50%
+    });
+
+    it("Should start 3-outcome market at equal probabilities", async function () {
+      const outcomes = ["Option A", "Option B", "Option C"];
+      await opinionMarket
+        .connect(creator)
+        .createMarket("Test Market", outcomes, ONE_DAY, "Description");
+
+      const probA = await opinionMarket.getOutcomeProbability(1, 0);
+      const probB = await opinionMarket.getOutcomeProbability(1, 1);
+      const probC = await opinionMarket.getOutcomeProbability(1, 2);
+
+      // Each should be approximately 33.33% (3333 basis points)
+      expect(probA).to.equal(3333);
+      expect(probB).to.equal(3333);
+      expect(probC).to.equal(3333); // All equal due to integer division
+    });
+
+    it("Should prevent extreme price movement on first bet", async function () {
+      const outcomes = ["Yes", "No"];
+      await opinionMarket
+        .connect(creator)
+        .createMarket("Test Market", outcomes, ONE_DAY, "Description");
+
+      // Place first bet of $100 on Yes
+      await opinionMarket.connect(user1).placeBet(1, 0, toUsdc(100));
+
+      const yesProb = await opinionMarket.getOutcomeProbability(1, 0);
+      const noProb = await opinionMarket.getOutcomeProbability(1, 1);
+
+      // Probability should move slightly, not to 100%
+      expect(yesProb).to.be.gt(5000); // Greater than 50%
+      expect(yesProb).to.be.lt(10000); // Less than 100%
+      expect(noProb).to.be.gt(0); // Greater than 0%
+      expect(noProb).to.be.lt(5000); // Less than 50%
+
+      // Total probability should be approximately 100% (allow for rounding)
+      expect(yesProb + noProb).to.be.closeTo(10000, 1);
+    });
+
+    it("Should calculate shares using virtual liquidity", async function () {
+      const outcomes = ["Yes", "No"];
+      await opinionMarket
+        .connect(creator)
+        .createMarket("Test Market", outcomes, ONE_DAY, "Description");
+
+      const betAmount = toUsdc(100);
+      const totalFee = (betAmount * BigInt(150)) / BigInt(10000); // 1.5%
+      const amountAfterFee = betAmount - totalFee;
+
+      // Calculate expected shares using virtual liquidity
+      // Virtual liquidity per outcome = 5000 USDC
+      // Total effective reserves = 5000 + 5000 = 10000 USDC
+      // Outcome effective reserve = 5000 USDC
+      // shares = (amountAfterFee * totalEffectiveReserves) / outcomeEffectiveReserve
+      const expectedShares = (amountAfterFee * toUsdc(10000)) / toUsdc(5000);
+
+      const shares = await opinionMarket.calculateShares(1, 0, amountAfterFee);
+      expect(shares).to.equal(expectedShares);
+    });
+
+    it("Should have different share amounts for different probabilities", async function () {
+      const outcomes = ["Yes", "No"];
+      await opinionMarket
+        .connect(creator)
+        .createMarket("Test Market", outcomes, ONE_DAY, "Description");
+
+      // First bet on Yes shifts probability
+      await opinionMarket.connect(user1).placeBet(1, 0, toUsdc(1000));
+
+      const betAmount = toUsdc(100);
+      const totalFee = (betAmount * BigInt(150)) / BigInt(10000); // 1.5%
+      const amountAfterFee = betAmount - totalFee;
+
+      // Calculate shares for betting on Yes (higher probability, fewer shares)
+      const sharesYes = await opinionMarket.calculateShares(1, 0, amountAfterFee);
+
+      // Calculate shares for betting on No (lower probability, more shares)
+      const sharesNo = await opinionMarket.calculateShares(1, 1, amountAfterFee);
+
+      // Betting on underdog (No) should give more shares
+      expect(sharesNo).to.be.gt(sharesYes);
+    });
+
+    it("Should exclude virtual liquidity from payouts", async function () {
+      const outcomes = ["Yes", "No"];
+      await opinionMarket
+        .connect(creator)
+        .createMarket("Test Market", outcomes, ONE_DAY, "Description");
+
+      // Users place bets
+      await opinionMarket.connect(user1).placeBet(1, 0, toUsdc(1000)); // Yes
+      await opinionMarket.connect(user2).placeBet(1, 1, toUsdc(500));  // No
+
+      // Calculate total fees
+      const totalFee1 = (toUsdc(1000) * BigInt(150)) / BigInt(10000);
+      const totalFee2 = (toUsdc(500) * BigInt(150)) / BigInt(10000);
+
+      // Expected total payout = sum of bets after fees (no virtual liquidity)
+      const expectedTotalPayout = (toUsdc(1000) - totalFee1) + (toUsdc(500) - totalFee2);
+
+      // Fast forward past market end
+      await time.increase(ONE_DAY + 1);
+
+      // Resolve market with Yes winning
+      await opinionMarket.connect(owner).resolveMarket(1, 0);
+
+      // Get user1's balance before claiming
+      const balanceBefore = await mockUsdc.balanceOf(user1Address);
+
+      // User1 claims winnings
+      await opinionMarket.connect(user1).claimWinnings(1);
+
+      const balanceAfter = await mockUsdc.balanceOf(user1Address);
+      const payout = balanceAfter - balanceBefore;
+
+      // Payout should equal total pool (all bets after fees), not include virtual liquidity
+      // User1 had all Yes shares, so gets entire pool
+      expect(payout).to.equal(expectedTotalPayout);
+      expect(payout).to.be.lt(toUsdc(5000)); // Much less than virtual liquidity
+    });
+
+    it("Should maintain stable pricing with sequential small bets", async function () {
+      const outcomes = ["Yes", "No"];
+      await opinionMarket
+        .connect(creator)
+        .createMarket("Test Market", outcomes, ONE_DAY, "Description");
+
+      // Place 10 small bets on Yes
+      for (let i = 0; i < 10; i++) {
+        await opinionMarket.connect(user1).placeBet(1, 0, toUsdc(10));
+      }
+
+      const yesProb = await opinionMarket.getOutcomeProbability(1, 0);
+
+      // After $100 total in bets, probability should still be reasonable
+      expect(yesProb).to.be.gt(5000); // Greater than 50%
+      expect(yesProb).to.be.lt(7000); // Less than 70% (stable movement)
+    });
+
+    it("Should converge probabilities with balanced betting", async function () {
+      const outcomes = ["Yes", "No"];
+      await opinionMarket
+        .connect(creator)
+        .createMarket("Test Market", outcomes, ONE_DAY, "Description");
+
+      // Place equal bets on both outcomes
+      await opinionMarket.connect(user1).placeBet(1, 0, toUsdc(1000)); // Yes
+      await opinionMarket.connect(user2).placeBet(1, 1, toUsdc(1000)); // No
+
+      const yesProb = await opinionMarket.getOutcomeProbability(1, 0);
+      const noProb = await opinionMarket.getOutcomeProbability(1, 1);
+
+      // With equal bets, probabilities should be approximately equal
+      // Allow small deviation due to rounding
+      expect(yesProb).to.be.closeTo(5000, 50); // ~50%
+      expect(noProb).to.be.closeTo(5000, 50); // ~50%
+    });
+  });
 });
