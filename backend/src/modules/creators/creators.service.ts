@@ -532,7 +532,7 @@ export class CreatorsService {
           const totalVolume = await this.marketTradeRepository
             .createQueryBuilder('trade')
             .select('SUM(trade.amount)', 'total')
-            .where('trade.opinionMarketMarketId = :marketId', { marketId: market.marketId })
+            .where('trade.marketId = :marketId', { marketId: market.id })
             .getRawOne();
 
           const marketStatus = market.isResolved
@@ -660,7 +660,7 @@ export class CreatorsService {
       const volumeResult = await this.marketTradeRepository
         .createQueryBuilder('trade')
         .select('SUM(trade.amount)', 'total')
-        .where('trade.opinionMarketMarketId = :marketId', { marketId: market.marketId })
+        .where('trade.marketId = :marketId', { marketId: market.id })
         .getRawOne();
 
       totalVolume += BigInt(volumeResult.total || '0');

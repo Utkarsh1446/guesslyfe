@@ -408,8 +408,8 @@ export class MarketsService {
       creatorHandle: market.creator.user.twitterHandle,
       creatorName: market.creator.user.displayName,
       question: market.question,
-      description: market.description || undefined,
-      category: market.category || undefined,
+      description: market.description ?? undefined,
+      category: market.category ?? undefined,
       endTime: market.endTime,
       liquidityPool: this.contractsService.formatUSDC(BigInt(marketInfo.liquidityPool)),
       yesProbability: probabilities.yesProbability,
@@ -744,7 +744,7 @@ export class MarketsService {
     //   unsignedTx,
     //   winnings: this.contractsService.formatUSDC(winningsAmount),
     //   marketId,
-    //   winningOutcome: marketInfo.winningOutcome || undefined,
+    //   winningOutcome: marketInfo.winningOutcome ?? undefined,
     //   winningShares: this.contractsService.formatUSDC(winningShares),
     // });
   }
@@ -773,7 +773,7 @@ export class MarketsService {
       activities.push({
         id: `create-${market.marketId}`,
         type: 'CREATED',
-        userAddress: market.creatorAddress || undefined,
+        userAddress: market.creatorAddress ?? undefined,
         userHandle: market.creator.user.twitterHandle,
         description: `Market created: "${market.question}"`,
         timestamp: market.createdAt,
@@ -817,10 +817,10 @@ export class MarketsService {
       activities.push({
         id: `resolved-${market.marketId}`,
         type: 'RESOLVED',
-        userAddress: market.creatorAddress || undefined,
+        userAddress: market.creatorAddress ?? undefined,
         userHandle: market.creator.user.twitterHandle,
         description: `Market resolved: ${outcomeText} won`,
-        outcome: marketInfo.winningOutcome || undefined,
+        outcome: marketInfo.winningOutcome ?? undefined,
         timestamp: new Date(), // In production, get from blockchain event
       });
     }
@@ -829,7 +829,7 @@ export class MarketsService {
       activities.push({
         id: `cancelled-${market.marketId}`,
         type: 'CANCELLED',
-        userAddress: market.creatorAddress || undefined,
+        userAddress: market.creatorAddress ?? undefined,
         userHandle: market.creator.user.twitterHandle,
         description: 'Market cancelled',
         timestamp: new Date(), // In production, get from blockchain event

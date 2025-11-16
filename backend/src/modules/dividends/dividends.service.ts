@@ -402,9 +402,8 @@ export class DividendsService {
       const latestEpoch = Math.max(...epochs.map((e) => e.epochNumber));
 
       // Calculate days since first claimable
-      const firstEndTime = epochs.sort(
-        (a, b) => a.endTime.getTime() - b.endTime.getTime(),
-      )[0]!.endTime;
+      const sortedEpochs = epochs.sort((a, b) => a.endTime.getTime() - b.endTime.getTime());
+      const firstEndTime = sortedEpochs[0].endTime; // Safe: epochs.length > 0 is guaranteed by check above
       const daysSinceFirst = Math.floor((Date.now() - firstEndTime.getTime()) / (1000 * 60 * 60 * 24));
 
       // Check if meets requirements
