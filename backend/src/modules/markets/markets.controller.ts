@@ -1,11 +1,14 @@
 import {
   Controller,
   Get,
+  Post,
   Param,
   Query,
+  Body,
   UseGuards,
   ParseIntPipe,
   DefaultValuePipe,
+  Req,
 } from '@nestjs/common';
 import {
   ApiTags,
@@ -13,9 +16,11 @@ import {
   ApiResponse,
   ApiParam,
   ApiQuery,
+  ApiBearerAuth,
 } from '@nestjs/swagger';
 import { MarketsService } from './markets.service';
 import { OptionalAuthGuard } from '../auth/guards/optional-auth.guard';
+import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import {
   MarketResponseDto,
   MarketPriceQuoteDto,
@@ -23,11 +28,43 @@ import {
   MarketTradeDto,
   TrendingMarketDto,
 } from './dto/market-response.dto';
+import { CreateMarketDto, CreateMarketResponseDto } from './dto/create-market.dto';
+import {
+  TradeMarketDto,
+  TradeMarketResponseDto,
+  ClaimWinningsDto,
+  ClaimWinningsResponseDto,
+} from './dto/trade-market.dto';
+import { MarketActivityDto, UserPositionResponseDto } from './dto/market-activity.dto';
 
 @ApiTags('Markets')
 @Controller('markets')
 export class MarketsController {
   constructor(private readonly marketsService: MarketsService) {}
+
+  /**
+   * Create a new prediction market (Creator only)
+   */
+  @Post('create')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Create a new prediction market',
+    description:
+      'Creates a new binary prediction market. Only approved creators can create markets. ' +
+      'Outcomes must sum to 100% probability. Virtual liquidity (5000 USDC per outcome) is automatically added.',
+  })
+  @ApiResponse({ status: 201, description: 'Market created successfully', type: CreateMarketResponseDto })
+  @ApiResponse({ status: 400, description: 'Invalid parameters or probabilities do not sum to 100%' })
+  @ApiResponse({ status: 403, description: 'Creator not approved' })
+  @ApiResponse({ status: 404, description: 'Creator not found' })
+  async createMarket(
+    @Req() req: any,
+    @Body() createDto: CreateMarketDto,
+  ): Promise<CreateMarketResponseDto> {
+    const creatorAddress = req.user.walletAddress;
+    return this.marketsService.createMarket(creatorAddress, createDto);
+  }
 
   /**
    * Get all markets with filtering and pagination
@@ -168,5 +205,96 @@ export class MarketsController {
     @Query('offset', new DefaultValuePipe(0), ParseIntPipe) offset: number,
   ): Promise<MarketTradeDto[]> {
     return this.marketsService.getMarketTrades(marketId, limit, offset);
+  }
+
+  /**
+   * Get specific user position in a market
+   */
+  @Get(':id/positions/:address')
+  @UseGuards(OptionalAuthGuard)
+  @ApiOperation({ summary: 'Get user position in a specific market' })
+  @ApiParam({ name: 'id', description: 'Market ID' })
+  @ApiParam({ name: 'address', description: 'User wallet address' })
+  @ApiResponse({ status: 200, description: 'User position', type: UserPositionResponseDto })
+  @ApiResponse({ status: 404, description: 'Market not found' })
+  async getUserPosition(
+    @Param('id') marketId: string,
+    @Param('address') userAddress: string,
+  ): Promise<UserPositionResponseDto> {
+    return this.marketsService.getUserPosition(marketId, userAddress);
+  }
+
+  /**
+   * Get market activity feed
+   */
+  @Get(':id/activity')
+  @UseGuards(OptionalAuthGuard)
+  @ApiOperation({ summary: 'Get all activity for a market (creation, trades, resolution)' })
+  @ApiParam({ name: 'id', description: 'Market ID' })
+  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Number of activities (default: 50)' })
+  @ApiQuery({ name: 'offset', required: false, type: Number, description: 'Offset for pagination (default: 0)' })
+  @ApiResponse({ status: 200, description: 'Market activity feed', type: [MarketActivityDto] })
+  @ApiResponse({ status: 404, description: 'Market not found' })
+  async getMarketActivity(
+    @Param('id') marketId: string,
+    @Query('limit', new DefaultValuePipe(50), ParseIntPipe) limit: number,
+    @Query('offset', new DefaultValuePipe(0), ParseIntPipe) offset: number,
+  ): Promise<MarketActivityDto[]> {
+    return this.marketsService.getMarketActivity(marketId, limit, offset);
+  }
+
+  /**
+   * Prepare unsigned transaction for placing a bet
+   * NOTE: This does NOT execute the transaction. Frontend must sign and submit.
+   */
+  @Post(':id/trade')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Prepare unsigned transaction for placing a bet',
+    description:
+      'Returns an unsigned transaction that the frontend must sign with the user wallet. ' +
+      'Includes slippage protection via minShares parameter. User must have approved USDC to market contract.',
+  })
+  @ApiParam({ name: 'id', description: 'Market ID' })
+  @ApiResponse({ status: 200, description: 'Unsigned transaction for user to sign', type: TradeMarketResponseDto })
+  @ApiResponse({ status: 400, description: 'Market not active or slippage protection triggered' })
+  @ApiResponse({ status: 404, description: 'Market not found' })
+  async trade(
+    @Param('id') marketId: string,
+    @Body() tradeDto: TradeMarketDto,
+    @Req() req: any,
+  ): Promise<TradeMarketResponseDto> {
+    const userAddress = req.user.walletAddress;
+    // Ensure marketId in DTO matches URL param
+    tradeDto.marketId = marketId;
+    return this.marketsService.prepareTrade(tradeDto, userAddress);
+  }
+
+  /**
+   * Prepare unsigned transaction for claiming winnings
+   * NOTE: This does NOT execute the transaction. Frontend must sign and submit.
+   */
+  @Post(':id/claim')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Prepare unsigned transaction for claiming winnings',
+    description:
+      'Returns an unsigned transaction that the frontend must sign with the user wallet. ' +
+      'Only available for resolved markets where user has winning shares.',
+  })
+  @ApiParam({ name: 'id', description: 'Market ID' })
+  @ApiResponse({ status: 200, description: 'Unsigned transaction for user to sign', type: ClaimWinningsResponseDto })
+  @ApiResponse({ status: 400, description: 'Market not resolved or no winning shares' })
+  @ApiResponse({ status: 404, description: 'Market or position not found' })
+  async claim(
+    @Param('id') marketId: string,
+    @Req() req: any,
+  ): Promise<ClaimWinningsResponseDto> {
+    const userAddress = req.user.walletAddress;
+    const claimDto = new ClaimWinningsDto();
+    claimDto.marketId = marketId;
+    return this.marketsService.prepareClaim(claimDto, userAddress);
   }
 }
