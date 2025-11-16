@@ -75,7 +75,7 @@ export class TwitterService {
         tweetCount: apiUser.public_metrics.tweet_count, // Always from API (more reliable)
         createdAt: new Date(apiUser.created_at),
         isCreator: !!user?.creator,
-        creatorAddress: user?.creator?.creatorAddress,
+        creatorAddress: user?.creator?.creatorAddress || undefined,
       });
 
       // Cache for 15 minutes

@@ -151,7 +151,7 @@ export class SharesService {
     }
 
     const transactions = await this.shareTransactionRepository.find({
-      where: { creatorShare: { creatorAddress: creatorAddress.toLowerCase() } },
+      where: { creator: { creatorAddress: creatorAddress.toLowerCase() } },
       order: { timestamp: 'DESC' },
       take: limit,
       skip: offset,
@@ -172,7 +172,7 @@ export class SharesService {
         traderHandle: user?.twitterHandle,
         shares: this.formatUSDC(BigInt(tx.shares)),
         pricePerShare: this.formatUSDC(BigInt(tx.pricePerShare)),
-        totalPrice: this.formatUSDC(BigInt(tx.totalPrice)),
+        totalPrice: this.formatUSDC(BigInt(tx.totalAmount)),
         protocolFee: this.formatUSDC(BigInt(tx.protocolFee)),
         creatorFee: this.formatUSDC(BigInt(tx.creatorFee)),
         transactionHash: tx.transactionHash,
@@ -204,7 +204,7 @@ export class SharesService {
       // Calculate 24h volume
       const transactions24h = await this.shareTransactionRepository.find({
         where: {
-          creatorShare: { creatorAddress: creator.creatorAddress },
+          creator: { creatorAddress: creator.creatorAddress },
           timestamp: MoreThan(oneDayAgo),
         },
       });
@@ -216,11 +216,13 @@ export class SharesService {
       const uniqueTraders = new Set<string>();
 
       for (const tx of transactions24h) {
-        volume24h += BigInt(tx.totalPrice);
-        uniqueTraders.add(tx.buyer.toLowerCase());
+        volume24h += BigInt(tx.totalAmount);
+        if (tx.buyer) uniqueTraders.add(tx.buyer.toLowerCase());
       }
 
       // Get current price (buy price for 1 share)
+      if (!creator.creatorAddress) continue;
+
       let currentPrice = '0';
       try {
         const priceQuote = await this.getBuyPriceQuote(creator.creatorAddress, 1);
@@ -232,8 +234,8 @@ export class SharesService {
       // Calculate 24h price change
       // Get first and last transaction prices
       const sortedTxs = transactions24h.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
-      const firstPrice = BigInt(sortedTxs[0].pricePerShare);
-      const lastPrice = BigInt(sortedTxs[sortedTxs.length - 1].pricePerShare);
+      const firstPrice = BigInt(sortedTxs[0].pricePerShare || 0);
+      const lastPrice = BigInt(sortedTxs[sortedTxs.length - 1].pricePerShare || 0);
       const priceChange24h = firstPrice > BigInt(0)
         ? Number(((lastPrice - firstPrice) * BigInt(10000)) / firstPrice) / 100
         : 0;
@@ -245,12 +247,12 @@ export class SharesService {
         creatorAddress: creator.creatorAddress,
         twitterHandle: creator.user.twitterHandle,
         displayName: creator.user.displayName,
-        profilePictureUrl: creator.profilePictureUrl,
+        profilePictureUrl: creator.profilePictureUrl || '',
         volume24h: this.formatUSDC(volume24h),
         priceChange24h,
         currentPrice,
         traders24h: uniqueTraders.size,
-        totalSupply: supply.supplyFormatted,
+        totalSupply: supply.toString(),
       });
     }
 
@@ -434,7 +436,7 @@ export class SharesService {
     // Get all transactions in time range
     const transactions = await this.shareTransactionRepository.find({
       where: {
-        creatorShare: { creatorAddress: creatorAddress.toLowerCase() },
+        creator: { creatorAddress: creatorAddress.toLowerCase() },
         timestamp: MoreThan(startTime),
       },
       order: { timestamp: 'ASC' },
@@ -451,8 +453,8 @@ export class SharesService {
       const bucketKey = Math.floor(tx.timestamp.getTime() / bucketSize) * bucketSize;
 
       const bucket = buckets.get(bucketKey) || { volume: BigInt(0), prices: [], txCount: 0 };
-      bucket.volume += BigInt(tx.totalPrice);
-      bucket.prices.push(BigInt(tx.pricePerShare));
+      bucket.volume += BigInt(tx.totalAmount);
+      if (tx.pricePerShare) bucket.prices.push(BigInt(tx.pricePerShare));
       bucket.txCount += 1;
       buckets.set(bucketKey, bucket);
     }
@@ -479,13 +481,13 @@ export class SharesService {
 
     if (transactions.length > 0) {
       for (const tx of transactions) {
-        const price = BigInt(tx.pricePerShare);
+        const price = BigInt(tx.pricePerShare || 0);
         if (price < lowPrice) lowPrice = price;
         if (price > highPrice) highPrice = price;
-        totalVolume += BigInt(tx.totalPrice);
+        totalVolume += BigInt(tx.totalAmount);
       }
-      firstPrice = BigInt(transactions[0].pricePerShare);
-      lastPrice = BigInt(transactions[transactions.length - 1].pricePerShare);
+      firstPrice = BigInt(transactions[0].pricePerShare || 0);
+      lastPrice = BigInt(transactions[transactions.length - 1].pricePerShare || 0);
     }
 
     // Get current price
