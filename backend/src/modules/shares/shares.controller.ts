@@ -1,8 +1,10 @@
 import {
   Controller,
   Get,
+  Post,
   Param,
   Query,
+  Body,
   UseGuards,
   ParseIntPipe,
   DefaultValuePipe,
@@ -21,6 +23,13 @@ import {
   ShareHistoryDto,
   TrendingShareDto,
 } from './dto/share-response.dto';
+import { BuySharesDto } from './dto/buy-shares.dto';
+import { SellSharesDto } from './dto/sell-shares.dto';
+import {
+  BuySharesResponseDto,
+  SellSharesResponseDto,
+} from './dto/unsigned-transaction.dto';
+import { ShareChartDataDto } from './dto/chart-data.dto';
 
 @ApiTags('Shares')
 @Controller('shares')
@@ -106,5 +115,66 @@ export class SharesController {
     @Query('limit', new DefaultValuePipe(10), ParseIntPipe) limit: number,
   ): Promise<TrendingShareDto[]> {
     return this.sharesService.getTrendingShares(limit);
+  }
+
+  /**
+   * Prepare unsigned transaction for buying shares
+   * NOTE: This does NOT execute the transaction. Frontend must sign and submit.
+   */
+  @Post('buy')
+  @UseGuards(OptionalAuthGuard)
+  @ApiOperation({
+    summary: 'Prepare unsigned transaction for buying creator shares',
+    description:
+      'Returns an unsigned transaction that the frontend must sign with the user wallet. ' +
+      'Includes slippage protection via maxPrice parameter. User must have approved USDC to share contract.',
+  })
+  @ApiResponse({ status: 200, description: 'Unsigned transaction for user to sign', type: BuySharesResponseDto })
+  @ApiResponse({ status: 400, description: 'Invalid parameters, shares not unlocked, or price exceeded maxPrice' })
+  @ApiResponse({ status: 404, description: 'Creator or share contract not found' })
+  async buyShares(@Body() buyDto: BuySharesDto): Promise<BuySharesResponseDto> {
+    return this.sharesService.prepareBuyTransaction(buyDto);
+  }
+
+  /**
+   * Prepare unsigned transaction for selling shares
+   * NOTE: This does NOT execute the transaction. Frontend must sign and submit.
+   */
+  @Post('sell')
+  @UseGuards(OptionalAuthGuard)
+  @ApiOperation({
+    summary: 'Prepare unsigned transaction for selling creator shares',
+    description:
+      'Returns an unsigned transaction that the frontend must sign with the user wallet. ' +
+      'Includes slippage protection via minPrice parameter. User must own the shares.',
+  })
+  @ApiResponse({ status: 200, description: 'Unsigned transaction for user to sign', type: SellSharesResponseDto })
+  @ApiResponse({ status: 400, description: 'Invalid parameters, shares not unlocked, or price below minPrice' })
+  @ApiResponse({ status: 404, description: 'Creator or share contract not found' })
+  async sellShares(@Body() sellDto: SellSharesDto): Promise<SellSharesResponseDto> {
+    return this.sharesService.prepareSellTransaction(sellDto);
+  }
+
+  /**
+   * Get price chart data for creator shares
+   */
+  @Get(':creatorAddress/chart')
+  @UseGuards(OptionalAuthGuard)
+  @ApiOperation({ summary: 'Get price chart data for creator shares' })
+  @ApiParam({ name: 'creatorAddress', description: 'Creator wallet address' })
+  @ApiQuery({
+    name: 'timeframe',
+    required: false,
+    enum: ['24h', '7d', '30d', 'all'],
+    description: 'Timeframe for chart data (default: 24h)',
+  })
+  @ApiResponse({ status: 200, description: 'Price chart data', type: ShareChartDataDto })
+  @ApiResponse({ status: 404, description: 'Creator not found' })
+  @ApiResponse({ status: 400, description: 'Shares not unlocked' })
+  async getChartData(
+    @Param('creatorAddress') creatorAddress: string,
+    @Query('timeframe') timeframe: '24h' | '7d' | '30d' | 'all' = '24h',
+  ): Promise<ShareChartDataDto> {
+    return this.sharesService.getChartData(creatorAddress, timeframe);
   }
 }

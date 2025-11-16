@@ -13,6 +13,14 @@ import {
   ShareHistoryDto,
   TrendingShareDto,
 } from './dto/share-response.dto';
+import { BuySharesDto } from './dto/buy-shares.dto';
+import { SellSharesDto } from './dto/sell-shares.dto';
+import {
+  BuySharesResponseDto,
+  SellSharesResponseDto,
+  UnsignedTransactionDto,
+} from './dto/unsigned-transaction.dto';
+import { ShareChartDataDto, ChartDataPointDto } from './dto/chart-data.dto';
 
 @Injectable()
 export class SharesService {
@@ -250,6 +258,271 @@ export class SharesService {
     trending.sort((a, b) => parseFloat(b.volume24h) - parseFloat(a.volume24h));
 
     return trending.slice(0, limit);
+  }
+
+  /**
+   * Prepare unsigned transaction for buying shares
+   * NOTE: This generates the transaction data but does NOT execute it.
+   * The frontend must sign and submit this transaction.
+   */
+  async prepareBuyTransaction(buyDto: BuySharesDto): Promise<BuySharesResponseDto> {
+    const { creatorAddress, amount, maxPrice } = buyDto;
+
+    // Validate creator and check shares unlocked
+    const creator = await this.creatorRepository.findOne({
+      where: { creatorAddress: creatorAddress.toLowerCase() },
+    });
+
+    if (!creator) {
+      throw new NotFoundException('Creator not found');
+    }
+
+    const volumeInfo = await this.creatorShareFactoryService.getVolumeInfo(creatorAddress);
+    if (!volumeInfo.isUnlocked) {
+      throw new BadRequestException('Creator shares are not yet unlocked for trading');
+    }
+
+    // Get share contract address
+    const shareContractAddress = await this.creatorShareFactoryService.getShareContract(creatorAddress);
+    if (!shareContractAddress) {
+      throw new NotFoundException('Share contract not found');
+    }
+
+    // Get current price quote
+    const priceQuote = await this.getBuyPriceQuote(creatorAddress, amount);
+
+    // Validate maxPrice (slippage protection)
+    const maxPriceInUSDC = parseFloat(maxPrice) * 1e6;
+    const totalCostInUSDC = parseFloat(priceQuote.totalCost) * 1e6;
+
+    if (totalCostInUSDC > maxPriceInUSDC) {
+      throw new BadRequestException(
+        `Price ${priceQuote.totalCost} USDC exceeds maxPrice ${maxPrice} USDC (slippage protection)`,
+      );
+    }
+
+    // Encode function call: buyShares(uint256 amount)
+    const amountInUnits = BigInt(amount) * BigInt(1e6);
+    const shareContract = await this.contractsService.getCreatorShareContract(shareContractAddress);
+
+    // Encode the function call
+    const data = shareContract.interface.encodeFunctionData('buyShares', [amountInUnits]);
+
+    const unsignedTx = new UnsignedTransactionDto({
+      to: shareContractAddress,
+      data,
+      value: '0',
+      gasLimit: '300000', // Estimate
+      description: `Buy ${amount} shares of creator ${creatorAddress}`,
+    });
+
+    return new BuySharesResponseDto({
+      unsignedTx,
+      estimatedCost: priceQuote.totalCost,
+      shares: amount.toString(),
+      creatorAddress,
+      shareContractAddress,
+    });
+  }
+
+  /**
+   * Prepare unsigned transaction for selling shares
+   * NOTE: This generates the transaction data but does NOT execute it.
+   * The frontend must sign and submit this transaction.
+   */
+  async prepareSellTransaction(sellDto: SellSharesDto): Promise<SellSharesResponseDto> {
+    const { creatorAddress, amount, minPrice } = sellDto;
+
+    // Validate creator and check shares unlocked
+    const creator = await this.creatorRepository.findOne({
+      where: { creatorAddress: creatorAddress.toLowerCase() },
+    });
+
+    if (!creator) {
+      throw new NotFoundException('Creator not found');
+    }
+
+    const volumeInfo = await this.creatorShareFactoryService.getVolumeInfo(creatorAddress);
+    if (!volumeInfo.isUnlocked) {
+      throw new BadRequestException('Creator shares are not yet unlocked for trading');
+    }
+
+    // Get share contract address
+    const shareContractAddress = await this.creatorShareFactoryService.getShareContract(creatorAddress);
+    if (!shareContractAddress) {
+      throw new NotFoundException('Share contract not found');
+    }
+
+    // Get current price quote
+    const priceQuote = await this.getSellPriceQuote(creatorAddress, amount);
+
+    // Validate minPrice (slippage protection)
+    const minPriceInUSDC = parseFloat(minPrice) * 1e6;
+    const netProceedsInUSDC = parseFloat(priceQuote.totalCost) * 1e6; // totalCost is net proceeds for sells
+
+    if (netProceedsInUSDC < minPriceInUSDC) {
+      throw new BadRequestException(
+        `Net proceeds ${priceQuote.totalCost} USDC below minPrice ${minPrice} USDC (slippage protection)`,
+      );
+    }
+
+    // Encode function call: sellShares(uint256 amount)
+    const amountInUnits = BigInt(amount) * BigInt(1e6);
+    const shareContract = await this.contractsService.getCreatorShareContract(shareContractAddress);
+
+    // Encode the function call
+    const data = shareContract.interface.encodeFunctionData('sellShares', [amountInUnits]);
+
+    const unsignedTx = new UnsignedTransactionDto({
+      to: shareContractAddress,
+      data,
+      value: '0',
+      gasLimit: '300000', // Estimate
+      description: `Sell ${amount} shares of creator ${creatorAddress}`,
+    });
+
+    return new SellSharesResponseDto({
+      unsignedTx,
+      estimatedProceeds: priceQuote.totalCost, // Net proceeds after fees
+      shares: amount.toString(),
+      creatorAddress,
+      shareContractAddress,
+    });
+  }
+
+  /**
+   * Get price chart data for creator shares
+   */
+  async getChartData(
+    creatorAddress: string,
+    timeframe: '24h' | '7d' | '30d' | 'all',
+  ): Promise<ShareChartDataDto> {
+    // Validate creator exists
+    const creator = await this.creatorRepository.findOne({
+      where: { creatorAddress: creatorAddress.toLowerCase() },
+    });
+
+    if (!creator) {
+      throw new NotFoundException('Creator not found');
+    }
+
+    // Check if shares are unlocked
+    const volumeInfo = await this.creatorShareFactoryService.getVolumeInfo(creatorAddress);
+    if (!volumeInfo.isUnlocked) {
+      throw new BadRequestException('Creator shares are not yet unlocked for trading');
+    }
+
+    // Calculate time range
+    let startTime: Date;
+    const now = new Date();
+
+    switch (timeframe) {
+      case '24h':
+        startTime = new Date(now.getTime() - 24 * 60 * 60 * 1000);
+        break;
+      case '7d':
+        startTime = new Date(now.getTime() - 7 * 24 * 60 * 60 * 1000);
+        break;
+      case '30d':
+        startTime = new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000);
+        break;
+      case 'all':
+        startTime = new Date(0); // Beginning of time
+        break;
+    }
+
+    // Get all transactions in time range
+    const transactions = await this.shareTransactionRepository.find({
+      where: {
+        creatorShare: { creatorAddress: creatorAddress.toLowerCase() },
+        timestamp: MoreThan(startTime),
+      },
+      order: { timestamp: 'ASC' },
+    });
+
+    // Group transactions into time buckets
+    const bucketSize = this.getChartBucketSize(timeframe);
+    const dataPoints: ChartDataPointDto[] = [];
+
+    // Create buckets
+    const buckets = new Map<number, { volume: bigint; prices: bigint[]; txCount: number }>();
+
+    for (const tx of transactions) {
+      const bucketKey = Math.floor(tx.timestamp.getTime() / bucketSize) * bucketSize;
+
+      const bucket = buckets.get(bucketKey) || { volume: BigInt(0), prices: [], txCount: 0 };
+      bucket.volume += BigInt(tx.totalPrice);
+      bucket.prices.push(BigInt(tx.pricePerShare));
+      bucket.txCount += 1;
+      buckets.set(bucketKey, bucket);
+    }
+
+    // Convert buckets to data points
+    for (const [bucketKey, bucket] of Array.from(buckets.entries()).sort((a, b) => a[0] - b[0])) {
+      // Calculate average price for this bucket
+      const avgPrice = bucket.prices.reduce((sum, p) => sum + p, BigInt(0)) / BigInt(bucket.prices.length);
+
+      dataPoints.push({
+        timestamp: new Date(bucketKey),
+        price: this.formatUSDC(avgPrice),
+        volume: this.formatUSDC(bucket.volume),
+        transactions: bucket.txCount,
+      });
+    }
+
+    // Calculate statistics
+    let lowPrice = BigInt(Number.MAX_SAFE_INTEGER);
+    let highPrice = BigInt(0);
+    let totalVolume = BigInt(0);
+    let firstPrice = BigInt(0);
+    let lastPrice = BigInt(0);
+
+    if (transactions.length > 0) {
+      for (const tx of transactions) {
+        const price = BigInt(tx.pricePerShare);
+        if (price < lowPrice) lowPrice = price;
+        if (price > highPrice) highPrice = price;
+        totalVolume += BigInt(tx.totalPrice);
+      }
+      firstPrice = BigInt(transactions[0].pricePerShare);
+      lastPrice = BigInt(transactions[transactions.length - 1].pricePerShare);
+    }
+
+    // Get current price
+    const currentPriceQuote = await this.getBuyPriceQuote(creatorAddress, 1);
+    const currentPrice = currentPriceQuote.pricePerShare;
+
+    // Calculate price change
+    const priceChange = firstPrice > BigInt(0)
+      ? Number(((lastPrice - firstPrice) * BigInt(10000)) / firstPrice) / 100
+      : 0;
+
+    return new ShareChartDataDto({
+      creatorAddress,
+      timeframe,
+      data: dataPoints,
+      currentPrice,
+      lowPrice: lowPrice === BigInt(Number.MAX_SAFE_INTEGER) ? '0' : this.formatUSDC(lowPrice),
+      highPrice: this.formatUSDC(highPrice),
+      totalVolume: this.formatUSDC(totalVolume),
+      priceChange,
+    });
+  }
+
+  /**
+   * Helper: Get bucket size for chart data based on timeframe
+   */
+  private getChartBucketSize(timeframe: '24h' | '7d' | '30d' | 'all'): number {
+    switch (timeframe) {
+      case '24h':
+        return 60 * 60 * 1000; // 1 hour buckets
+      case '7d':
+        return 6 * 60 * 60 * 1000; // 6 hour buckets
+      case '30d':
+        return 24 * 60 * 60 * 1000; // 24 hour buckets
+      case 'all':
+        return 7 * 24 * 60 * 60 * 1000; // 7 day buckets
+    }
   }
 
   /**
