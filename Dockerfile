@@ -15,6 +15,9 @@ COPY backend/tsconfig.build.json ./
 COPY backend/nest-cli.json ./
 COPY backend/.prettierrc ./
 
+# Copy environment file for production
+COPY backend/.env.production .env
+
 # Build
 RUN npm run build
 
@@ -23,6 +26,9 @@ EXPOSE 8080
 
 # Set NODE_ENV
 ENV NODE_ENV=production
+
+# Listen on PORT env var (Cloud Run sets this)
+ENV PORT=8080
 
 # Start
 CMD ["node", "dist/main"]
