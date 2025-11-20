@@ -3,12 +3,13 @@ steps:
   - name: 'gcr.io/cloud-builders/docker'
     args:
       - 'build'
+      - '-f'
+      - 'backend/Dockerfile'
       - '-t'
       - 'gcr.io/$PROJECT_ID/guessly-backend:$COMMIT_SHA'
       - '-t'
       - 'gcr.io/$PROJECT_ID/guessly-backend:latest'
-      - '.'
-    dir: 'backend'
+      - 'backend/'
 
   # Push the container image to Container Registry
   - name: 'gcr.io/cloud-builders/docker'
