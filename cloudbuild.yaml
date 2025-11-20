@@ -42,3 +42,6 @@ images:
 
 options:
   logging: CLOUD_LOGGING_ONLY
+
+# Cloud Build trigger configuration
+timeout: '3600s'
