@@ -1,46 +1,45 @@
-import { Injectable, NotFoundException, BadRequestException, ForbiddenException } from '@nestjs/common';
+import { Injectable, NotFoundException, BadRequestException, Logger } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
 import { Creator } from '../../database/entities/creator.entity';
+import { CreatorStatus, MarketStatus } from '../../database/enums';
 import { User } from '../../database/entities/user.entity';
+import { Market } from '../../database/entities/market.entity';
+import { CreatorShare } from '../../database/entities/creator-share.entity';
 import { ShareTransaction } from '../../database/entities/share-transaction.entity';
-import { OpinionMarket } from '../../database/entities/opinion-market.entity';
-import { MarketTrade } from '../../database/entities/market-trade.entity';
-import { CreatorShareService } from '../../contracts/creator-share.service';
-import { CreatorShareFactoryService } from '../../contracts/creator-share-factory.service';
-import { OpinionMarketService } from '../../contracts/opinion-market.service';
-import { CreateCreatorDto } from './dto/create-creator.dto';
-import { UpdateCreatorDto } from './dto/update-creator.dto';
+import { CreatorResponseDto } from './dto/creator-response.dto';
+import { ApplyCreatorDto } from './dto/apply-creator.dto';
 import {
-  CreatorResponseDto,
-  CreatorShareInfoDto,
+  EligibilityCheckResponseDto,
+  VolumeProgressResponseDto,
+  ShareholdersResponseDto,
+  PerformanceResponseDto,
+  MarketVolumeDto,
   ShareholderDto,
-  CreatorMarketDto,
-} from './dto/creator-response.dto';
+} from './dto';
 
 @Injectable()
 export class CreatorsService {
+  private readonly logger = new Logger(CreatorsService.name);
+
   constructor(
     @InjectRepository(Creator)
     private readonly creatorRepository: Repository<Creator>,
     @InjectRepository(User)
     private readonly userRepository: Repository<User>,
+    @InjectRepository(Market)
+    private readonly marketRepository: Repository<Market>,
+    @InjectRepository(CreatorShare)
+    private readonly creatorShareRepository: Repository<CreatorShare>,
     @InjectRepository(ShareTransaction)
     private readonly shareTransactionRepository: Repository<ShareTransaction>,
-    @InjectRepository(OpinionMarket)
-    private readonly opinionMarketRepository: Repository<OpinionMarket>,
-    @InjectRepository(MarketTrade)
-    private readonly marketTradeRepository: Repository<MarketTrade>,
-    private readonly creatorShareService: CreatorShareService,
-    private readonly creatorShareFactoryService: CreatorShareFactoryService,
-    private readonly opinionMarketService: OpinionMarketService,
   ) {}
 
   /**
    * Apply to become a creator
    */
-  async applyToBeCreator(userId: string, createDto: CreateCreatorDto): Promise<CreatorResponseDto> {
-    // Get user
+  async applyCreator(userId: string, applyDto: ApplyCreatorDto): Promise<CreatorResponseDto> {
+    // Check if user exists
     const user = await this.userRepository.findOne({
       where: { id: userId },
       relations: ['creator'],
@@ -51,92 +50,38 @@ export class CreatorsService {
     }
 
     if (user.creator) {
-      throw new BadRequestException('User is already a creator');
+      throw new BadRequestException('User already has a creator profile');
     }
 
-    // Check if wallet address is already taken
-    const existingCreator = await this.creatorRepository.findOne({
-      where: { creatorAddress: createDto.creatorAddress.toLowerCase() },
-    });
-
-    if (existingCreator) {
-      throw new BadRequestException('Wallet address already registered as creator');
-    }
-
-    // Link wallet to user if not already linked
-    if (!user.walletAddress) {
-      user.walletAddress = createDto.creatorAddress.toLowerCase();
-      await this.userRepository.save(user);
-    } else if (user.walletAddress !== createDto.creatorAddress.toLowerCase()) {
-      throw new BadRequestException('Wallet address does not match user wallet');
-    }
-
-    // Create creator profile (pending approval)
+    // Create creator profile with PENDING status
     const creator = this.creatorRepository.create({
-      user,
-      creatorAddress: createDto.creatorAddress.toLowerCase(),
-      bio: createDto.bio,
-      profilePictureUrl: createDto.profilePictureUrl || user.profilePictureUrl,
-      websiteUrl: createDto.websiteUrl,
-      status: 'PENDING',
+      userId: user.id,
+      twitterId: user.twitterId,
+      twitterHandle: user.twitterHandle,
+      followerCount: user.followerCount,
+      status: CreatorStatus.PENDING,
     });
 
     await this.creatorRepository.save(creator);
+    this.logger.log(`Creator application submitted: @${user.twitterHandle}`);
 
-    return this.getCreatorByAddress(creator.creatorAddress);
+    return this.mapToResponseDto(creator);
   }
 
   /**
-   * Get all creators with filtering and pagination
+   * Get creator by share contract address
    */
-  async getAllCreators(
-    status?: 'PENDING' | 'APPROVED' | 'REJECTED',
-    page: number = 1,
-    limit: number = 20,
-  ): Promise<{ creators: CreatorResponseDto[]; total: number; page: number; totalPages: number }> {
-    const queryBuilder = this.creatorRepository
-      .createQueryBuilder('creator')
-      .leftJoinAndSelect('creator.user', 'user')
-      .orderBy('creator.createdAt', 'DESC');
-
-    // Filter by status (default: only show APPROVED)
-    if (status) {
-      queryBuilder.where('creator.status = :status', { status });
-    } else {
-      queryBuilder.where('creator.status = :status', { status: 'APPROVED' });
-    }
-
-    const [creators, total] = await queryBuilder
-      .skip((page - 1) * limit)
-      .take(limit)
-      .getManyAndCount();
-
-    const creatorResponses = await Promise.all(
-      creators.map((creator) => this.buildCreatorResponse(creator)),
-    );
-
-    return {
-      creators: creatorResponses,
-      total,
-      page,
-      totalPages: Math.ceil(total / limit),
-    };
-  }
-
-  /**
-   * Get creator by address
-   */
-  async getCreatorByAddress(creatorAddress: string): Promise<CreatorResponseDto> {
+  async getCreatorByAddress(address: string): Promise<CreatorResponseDto> {
     const creator = await this.creatorRepository.findOne({
-      where: { creatorAddress: creatorAddress.toLowerCase() },
+      where: { shareContractAddress: address.toLowerCase() },
       relations: ['user'],
     });
 
     if (!creator) {
-      throw new NotFoundException(`Creator with address ${creatorAddress} not found`);
+      throw new NotFoundException(`Creator with address ${address} not found`);
     }
 
-    return this.buildCreatorResponse(creator);
+    return this.mapToResponseDto(creator);
   }
 
   /**
@@ -144,346 +89,365 @@ export class CreatorsService {
    */
   async getCreatorByUserId(userId: string): Promise<CreatorResponseDto> {
     const creator = await this.creatorRepository.findOne({
-      where: { user: { id: userId } },
+      where: { userId },
       relations: ['user'],
     });
 
     if (!creator) {
-      throw new NotFoundException('User is not a creator');
+      throw new NotFoundException('Creator profile not found');
     }
 
-    return this.buildCreatorResponse(creator);
+    return this.mapToResponseDto(creator);
   }
 
   /**
-   * Update creator profile
+   * List all creators (filterable by status)
    */
-  async updateCreator(userId: string, updateDto: UpdateCreatorDto): Promise<CreatorResponseDto> {
+  async listCreators(status?: CreatorStatus): Promise<CreatorResponseDto[]> {
+    const where = status ? { status } : {};
+
+    const creators = await this.creatorRepository.find({
+      where,
+      relations: ['user'],
+      order: { createdAt: 'DESC' },
+    });
+
+    return creators.map(creator => this.mapToResponseDto(creator));
+  }
+
+  /**
+   * Approve creator (admin only)
+   */
+  async approveCreator(creatorId: string): Promise<CreatorResponseDto> {
     const creator = await this.creatorRepository.findOne({
-      where: { user: { id: userId } },
+      where: { id: creatorId },
       relations: ['user'],
     });
 
     if (!creator) {
-      throw new NotFoundException('User is not a creator');
+      throw new NotFoundException('Creator not found');
     }
 
-    // Update fields
-    if (updateDto.bio !== undefined) {
-      creator.bio = updateDto.bio;
-    }
-    if (updateDto.profilePictureUrl !== undefined) {
-      creator.profilePictureUrl = updateDto.profilePictureUrl;
-    }
-    if (updateDto.websiteUrl !== undefined) {
-      creator.websiteUrl = updateDto.websiteUrl;
+    if (creator.status !== CreatorStatus.PENDING) {
+      throw new BadRequestException(`Creator is already ${creator.status}`);
     }
 
+    creator.status = CreatorStatus.ACTIVE;
     await this.creatorRepository.save(creator);
 
-    return this.buildCreatorResponse(creator);
+    this.logger.log(`Creator activated: @${creator.twitterHandle}`);
+
+    return this.mapToResponseDto(creator);
   }
 
   /**
-   * Approve creator application (admin only)
+   * Reject creator (admin only)
    */
-  async approveCreator(creatorAddress: string, adminUserId: string): Promise<CreatorResponseDto> {
-    const admin = await this.userRepository.findOne({ where: { id: adminUserId } });
-    if (!admin || !admin.isAdmin) {
-      throw new ForbiddenException('Only admins can approve creators');
-    }
-
+  async rejectCreator(creatorId: string): Promise<CreatorResponseDto> {
     const creator = await this.creatorRepository.findOne({
-      where: { creatorAddress: creatorAddress.toLowerCase() },
+      where: { id: creatorId },
       relations: ['user'],
     });
 
     if (!creator) {
-      throw new NotFoundException(`Creator with address ${creatorAddress} not found`);
+      throw new NotFoundException('Creator not found');
     }
 
-    creator.status = 'APPROVED';
+    if (creator.status !== CreatorStatus.PENDING) {
+      throw new BadRequestException(`Creator is already ${creator.status}`);
+    }
+
+    creator.status = CreatorStatus.SUSPENDED;
     await this.creatorRepository.save(creator);
 
-    return this.buildCreatorResponse(creator);
+    this.logger.log(`Creator suspended: @${creator.twitterHandle}`);
+
+    return this.mapToResponseDto(creator);
   }
 
   /**
-   * Reject creator application (admin only)
+   * Check if user meets creator eligibility requirements
    */
-  async rejectCreator(creatorAddress: string, adminUserId: string): Promise<CreatorResponseDto> {
-    const admin = await this.userRepository.findOne({ where: { id: adminUserId } });
-    if (!admin || !admin.isAdmin) {
-      throw new ForbiddenException('Only admins can reject creators');
-    }
-
-    const creator = await this.creatorRepository.findOne({
-      where: { creatorAddress: creatorAddress.toLowerCase() },
-      relations: ['user'],
+  async checkEligibility(userId: string): Promise<EligibilityCheckResponseDto> {
+    const user = await this.userRepository.findOne({
+      where: { id: userId },
     });
 
-    if (!creator) {
-      throw new NotFoundException(`Creator with address ${creatorAddress} not found`);
+    if (!user) {
+      throw new NotFoundException('User not found');
     }
 
-    creator.status = 'REJECTED';
-    await this.creatorRepository.save(creator);
+    // Define tier thresholds
+    const tiers = [
+      { name: '50K-500K', minFollowers: 50000, maxFollowers: 500000 },
+      { name: '500K-5M', minFollowers: 500000, maxFollowers: 5000000 },
+      { name: '5M+', minFollowers: 5000000, maxFollowers: Infinity },
+    ];
 
-    return this.buildCreatorResponse(creator);
-  }
+    const userTier = tiers.find(
+      (tier) => user.followerCount >= tier.minFollowers && user.followerCount < tier.maxFollowers,
+    );
 
-  /**
-   * Get creator share information
-   */
-  async getCreatorShareInfo(creatorAddress: string): Promise<CreatorShareInfoDto> {
-    const creator = await this.creatorRepository.findOne({
-      where: { creatorAddress: creatorAddress.toLowerCase() },
-    });
+    // Requirements
+    const followersMet = user.followerCount >= 50000;
+    // TODO: Fetch these from Twitter API
+    const engagementRate = 0; // Placeholder - would fetch from Twitter
+    const postCount30d = 0; // Placeholder - would fetch from Twitter
+    const engagementMet = engagementRate >= 0.01; // 1%
+    const postCountMet = postCount30d >= 15;
 
-    if (!creator) {
-      throw new NotFoundException(`Creator with address ${creatorAddress} not found`);
-    }
-
-    // Get share contract address
-    const shareContract = await this.creatorShareFactoryService.getShareContract(creatorAddress);
-    if (!shareContract) {
-      throw new NotFoundException('Creator shares not yet created');
-    }
-
-    // Get volume info
-    const volumeInfo = await this.creatorShareFactoryService.getVolumeInfo(creatorAddress);
-
-    // Get current supply
-    const supply = await this.creatorShareService.getCurrentSupply(creatorAddress);
-
-    // Get buy/sell prices for 1 share
-    const oneShare = BigInt(1e6); // 1 share = 1e6 smallest units
-    const [buyPrice, sellPrice] = await Promise.all([
-      this.creatorShareService.getBuyPrice(creatorAddress, oneShare),
-      this.creatorShareService.getSellPrice(creatorAddress, oneShare),
-    ]);
-
-    // Count unique shareholders
-    const shareholderCount = await this.shareTransactionRepository
-      .createQueryBuilder('tx')
-      .select('COUNT(DISTINCT tx.buyer)', 'count')
-      .where('tx.creatorShareCreatorAddress = :address', { address: creatorAddress.toLowerCase() })
-      .getRawOne();
+    const eligible = followersMet && engagementMet && postCountMet;
 
     return {
-      creatorAddress,
-      shareContractAddress: shareContract,
-      currentSupply: supply.supplyFormatted,
-      shareholderCount: parseInt(shareholderCount.count) || 0,
-      buyPriceForOne: buyPrice.priceFormatted,
-      sellPriceForOne: sellPrice.priceFormatted,
-      totalVolume: volumeInfo.currentVolumeFormatted,
-      isUnlocked: volumeInfo.isUnlocked,
+      eligible,
+      bypassed: false,
+      tier: userTier?.name || null,
+      requirements: {
+        followerCount: {
+          required: 50000,
+          current: user.followerCount,
+          met: followersMet,
+        },
+        engagementRate: {
+          required: 0.01,
+          current: engagementRate,
+          met: engagementMet,
+        },
+        postCount30d: {
+          required: 15,
+          current: postCount30d,
+          met: postCountMet,
+        },
+      },
+      alternativeStake: !eligible
+        ? {
+            amount: 100,
+            refundable: true,
+          }
+        : null,
     };
   }
 
   /**
-   * Get list of shareholders for a creator
+   * Get creator's volume progress toward share unlock
    */
-  async getShareholderList(
-    creatorAddress: string,
-    limit: number = 50,
-    offset: number = 0,
-  ): Promise<ShareholderDto[]> {
+  async getVolumeProgress(creatorId: string): Promise<VolumeProgressResponseDto> {
     const creator = await this.creatorRepository.findOne({
-      where: { creatorAddress: creatorAddress.toLowerCase() },
+      where: { id: creatorId },
     });
 
     if (!creator) {
-      throw new NotFoundException(`Creator with address ${creatorAddress} not found`);
+      throw new NotFoundException('Creator not found');
     }
 
-    // Get all share transactions
-    const transactions = await this.shareTransactionRepository.find({
-      where: { creatorShare: { creatorAddress: creatorAddress.toLowerCase() } },
-      order: { timestamp: 'DESC' },
+    // Get all markets for this creator
+    const markets = await this.marketRepository.find({
+      where: { creatorId },
+      order: { createdAt: 'DESC' },
     });
 
-    // Calculate holdings per address
-    const holdingsMap = new Map<string, bigint>();
+    const marketVolumes: MarketVolumeDto[] = markets.map((market) => ({
+      id: market.id,
+      title: market.title,
+      volume: Number(market.totalVolume) || 0,
+      status: market.status,
+      createdAt: market.createdAt.toISOString(),
+    }));
 
-    for (const tx of transactions) {
-      const currentHolding = holdingsMap.get(tx.buyer) || BigInt(0);
-      if (tx.transactionType === 'BUY') {
-        holdingsMap.set(tx.buyer, currentHolding + BigInt(tx.shares));
-      } else if (tx.transactionType === 'SELL') {
-        holdingsMap.set(tx.buyer, currentHolding - BigInt(tx.shares));
-      }
-    }
+    const totalVolume = creator.totalMarketVolume || 0;
+    const threshold = 30000;
+    const progress = (totalVolume / threshold) * 100;
+    const remaining = Math.max(0, threshold - totalVolume);
 
-    // Get total supply for percentage calculation
-    const supply = await this.creatorShareService.getCurrentSupply(creatorAddress);
-    const totalSupply = BigInt(supply.supply);
-
-    // Build shareholder list
-    const shareholders: ShareholderDto[] = [];
-
-    for (const [address, shares] of holdingsMap.entries()) {
-      if (shares <= BigInt(0)) continue; // Skip if no shares
-
-      // Try to find user by wallet address
-      const user = await this.userRepository.findOne({
-        where: { walletAddress: address.toLowerCase() },
-      });
-
-      const percentageOfSupply = totalSupply > BigInt(0)
-        ? Number((shares * BigInt(10000)) / totalSupply) / 100
-        : 0;
-
-      shareholders.push({
-        address,
-        sharesHeld: this.formatUSDC(shares),
-        percentageOfSupply,
-        twitterHandle: user?.twitterHandle,
-        displayName: user?.displayName,
-      });
-    }
-
-    // Sort by shares held (descending)
-    shareholders.sort((a, b) => parseFloat(b.sharesHeld) - parseFloat(a.sharesHeld));
-
-    return shareholders.slice(offset, offset + limit);
+    return {
+      creatorId: creator.id,
+      totalVolume,
+      threshold,
+      progress: Math.min(100, progress),
+      remaining,
+      sharesUnlocked: creator.sharesUnlocked,
+      markets: marketVolumes,
+    };
   }
 
   /**
-   * Get markets created by creator
+   * Get list of shareholders for creator
    */
-  async getCreatorMarkets(
-    creatorAddress: string,
-    status?: 'ACTIVE' | 'RESOLVED' | 'CANCELLED',
+  async getShareholders(
+    creatorId: string,
+    page: number = 1,
     limit: number = 20,
-    offset: number = 0,
-  ): Promise<CreatorMarketDto[]> {
+    sort: 'shares' | 'value' = 'shares',
+  ): Promise<ShareholdersResponseDto> {
     const creator = await this.creatorRepository.findOne({
-      where: { creatorAddress: creatorAddress.toLowerCase() },
+      where: { id: creatorId },
     });
 
     if (!creator) {
-      throw new NotFoundException(`Creator with address ${creatorAddress} not found`);
+      throw new NotFoundException('Creator not found');
     }
 
-    const queryBuilder = this.opinionMarketRepository
-      .createQueryBuilder('market')
-      .where('market.creatorAddress = :address', { address: creatorAddress.toLowerCase() })
-      .orderBy('market.createdAt', 'DESC')
-      .skip(offset)
-      .take(limit);
-
-    const markets = await queryBuilder.getMany();
-
-    const marketDtos: CreatorMarketDto[] = [];
-
-    for (const market of markets) {
-      // Get on-chain market info
-      const marketInfo = await this.opinionMarketService.getMarketInfo(BigInt(market.marketId));
-      const probabilities = await this.opinionMarketService.getOutcomeProbabilities(
-        BigInt(market.marketId),
-      );
-
-      // Count unique participants
-      const participantCount = await this.marketTradeRepository
-        .createQueryBuilder('trade')
-        .select('COUNT(DISTINCT trade.userAddress)', 'count')
-        .where('trade.opinionMarketMarketId = :marketId', { marketId: market.marketId })
-        .getRawOne();
-
-      // Calculate total volume
-      const totalVolume = await this.marketTradeRepository
-        .createQueryBuilder('trade')
-        .select('SUM(trade.amount)', 'total')
-        .where('trade.opinionMarketMarketId = :marketId', { marketId: market.marketId })
-        .getRawOne();
-
-      const marketStatus = marketInfo.resolved
-        ? 'RESOLVED'
-        : marketInfo.cancelled
-        ? 'CANCELLED'
-        : 'ACTIVE';
-
-      // Apply status filter if specified
-      if (status && marketStatus !== status) continue;
-
-      marketDtos.push({
-        marketId: market.marketId.toString(),
-        question: market.question,
-        description: market.description,
-        endTime: market.endTime,
-        liquidityPool: this.formatUSDC(BigInt(marketInfo.liquidityPool)),
-        yesProbability: probabilities.yesProbability,
-        noProbability: probabilities.noProbability,
-        status: marketStatus,
-        winningOutcome: marketInfo.resolved ? marketInfo.winningOutcome : undefined,
-        totalVolume: this.formatUSDC(BigInt(totalVolume.total || '0')),
-        participantCount: parseInt(participantCount.count) || 0,
-        createdAt: market.createdAt,
-      });
+    if (!creator.shareContractAddress) {
+      return {
+        shareholders: [],
+        totalHolders: 0,
+        totalSupply: 0,
+        pagination: {
+          page,
+          limit,
+          total: 0,
+        },
+      };
     }
 
-    return marketDtos;
+    // Get shareholders
+    const [shareholders, total] = await this.creatorShareRepository.findAndCount({
+      where: { creatorId },
+      relations: ['creator'],
+      skip: (page - 1) * limit,
+      take: limit,
+      order: sort === 'shares' ? { sharesHeld: 'DESC' } : { totalInvested: 'DESC' },
+    });
+
+    const totalSupply = creator.totalShares || 0;
+
+    // Find users for addresses
+    const addresses = shareholders.map((s) => s.holderAddress);
+    const users = await this.userRepository.find({
+      where: addresses.map((addr) => ({ walletAddress: addr })),
+    });
+
+    const userMap = new Map(users.map((u) => [u.walletAddress?.toLowerCase(), u]));
+
+    const shareholderDtos: ShareholderDto[] = shareholders.map((holder) => {
+      const user = userMap.get(holder.holderAddress.toLowerCase());
+      const currentValue = holder.sharesHeld * (holder.averageBuyPrice || 0); // Simplified
+      const totalInvested = holder.totalInvested || 0;
+
+      return {
+        address: holder.holderAddress,
+        twitterHandle: user?.twitterHandle || null,
+        sharesHeld: holder.sharesHeld,
+        percentOfSupply: totalSupply > 0 ? (holder.sharesHeld / totalSupply) * 100 : 0,
+        averageBuyPrice: holder.averageBuyPrice || 0,
+        currentValue,
+        unrealizedPnL: currentValue - totalInvested,
+      };
+    });
+
+    return {
+      shareholders: shareholderDtos,
+      totalHolders: total,
+      totalSupply,
+      pagination: {
+        page,
+        limit,
+        total,
+      },
+    };
   }
 
   /**
-   * Helper: Build creator response DTO
+   * Get creator performance metrics
    */
-  private async buildCreatorResponse(creator: Creator): Promise<CreatorResponseDto> {
-    // Get volume info from blockchain
-    let shareContractAddress: string | null = null;
-    let currentVolume = '0';
-    let volumeThreshold = '0';
-    let remainingVolume = '0';
-    let sharesUnlocked = false;
+  async getPerformance(
+    creatorId: string,
+    timeframe: '7d' | '30d' | '90d' | 'all' = 'all',
+  ): Promise<PerformanceResponseDto> {
+    const creator = await this.creatorRepository.findOne({
+      where: { id: creatorId },
+    });
 
-    try {
-      const shareContract = await this.creatorShareFactoryService.getShareContract(
-        creator.creatorAddress,
-      );
-      shareContractAddress = shareContract;
-
-      if (shareContract) {
-        const volumeInfo = await this.creatorShareFactoryService.getVolumeInfo(
-          creator.creatorAddress,
-        );
-        currentVolume = volumeInfo.currentVolumeFormatted;
-        volumeThreshold = volumeInfo.thresholdFormatted;
-        remainingVolume = volumeInfo.remainingVolumeFormatted;
-        sharesUnlocked = volumeInfo.isUnlocked;
-      }
-    } catch (error) {
-      // Creator shares might not be created yet
+    if (!creator) {
+      throw new NotFoundException('Creator not found');
     }
 
-    return new CreatorResponseDto({
+    // Calculate date filter
+    let startDate = new Date(0);
+    if (timeframe !== 'all') {
+      const days = parseInt(timeframe);
+      startDate = new Date();
+      startDate.setDate(startDate.getDate() - days);
+    }
+
+    // Get markets
+    const allMarkets = await this.marketRepository.find({
+      where: { creatorId },
+    });
+
+    const resolvedMarkets = allMarkets.filter((m) => m.status === MarketStatus.RESOLVED);
+    const totalVolume = allMarkets.reduce((sum, m) => sum + Number(m.totalVolume || 0), 0);
+    const marketsCreated = allMarkets.length;
+    const marketsResolved = resolvedMarkets.length;
+
+    // Calculate resolution accuracy (placeholder - would need more logic)
+    const resolutionAccuracy = marketsResolved > 0 ? 0.85 : 0;
+
+    const averageMarketVolume =
+      marketsCreated > 0 ? totalVolume / marketsCreated : 0;
+
+    // Revenue calculation (2.5% of volume)
+    const totalRevenue = totalVolume * 0.025;
+    const marketFees = totalRevenue * 0.8; // 80% from markets
+    const shareFees = totalRevenue * 0.2; // 20% from shares
+
+    // Share performance
+    let sharePerformance = null;
+    if (creator.shareContractAddress) {
+      const shareholders = await this.creatorShareRepository.count({
+        where: { creatorId },
+      });
+
+      sharePerformance = {
+        currentPrice: 2.5, // Would need to fetch from blockchain
+        allTimeHigh: 3.0,
+        allTimeLow: 0.5,
+        holders: shareholders,
+        totalSupply: creator.totalShares || 0,
+      };
+    }
+
+    return {
+      performance: {
+        totalVolume,
+        marketsCreated,
+        marketsResolved,
+        resolutionAccuracy,
+        averageMarketVolume,
+        totalRevenue,
+        revenueBreakdown: {
+          marketFees,
+          shareFees,
+        },
+        sharePerformance,
+      },
+    };
+  }
+
+  /**
+   * Map Creator entity to response DTO
+   */
+  private mapToResponseDto(creator: Creator): CreatorResponseDto {
+    return {
       id: creator.id,
-      creatorAddress: creator.creatorAddress,
-      twitterHandle: creator.user.twitterHandle,
-      displayName: creator.user.displayName,
-      bio: creator.bio,
-      profilePictureUrl: creator.profilePictureUrl,
-      websiteUrl: creator.websiteUrl,
-      twitterFollowers: creator.user.twitterFollowers,
-      shareContractAddress,
-      sharesUnlocked,
-      currentVolume,
-      volumeThreshold,
-      remainingVolume,
+      userId: creator.userId,
+      twitterId: creator.twitterId,
+      twitterHandle: creator.twitterHandle,
+      followerCount: creator.followerCount,
+      engagementRate: creator.engagementRate,
+      postCount30d: creator.postCount30d,
+      qualifiedAt: creator.qualifiedAt,
+      stakePaid: creator.stakePaid,
+      stakeAmount: creator.stakeAmount,
+      stakeReturned: creator.stakeReturned,
+      totalMarketVolume: creator.totalMarketVolume,
+      sharesUnlocked: creator.sharesUnlocked,
+      sharesUnlockedAt: creator.sharesUnlockedAt,
+      shareContractAddress: creator.shareContractAddress,
+      totalShares: creator.totalShares,
       status: creator.status,
       createdAt: creator.createdAt,
       updatedAt: creator.updatedAt,
-    });
-  }
-
-  /**
-   * Helper: Format USDC amount
-   */
-  private formatUSDC(amount: bigint): string {
-    const formatted = amount.toString().padStart(7, '0');
-    const dollars = formatted.slice(0, -6) || '0';
-    const cents = formatted.slice(-6);
-    return `${dollars}.${cents}`;
+    };
   }
 }

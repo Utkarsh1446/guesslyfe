@@ -3,23 +3,23 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { UsersController } from './users.controller';
 import { UsersService } from './users.service';
 import { User } from '../../database/entities/user.entity';
+import { CreatorShare } from '../../database/entities/creator-share.entity';
 import { ShareTransaction } from '../../database/entities/share-transaction.entity';
-import { MarketPosition } from '../../database/entities/market-position.entity';
-import { MarketTrade } from '../../database/entities/market-trade.entity';
-import { DividendClaim } from '../../database/entities/dividend-claim.entity';
-import { ContractsModule } from '../../contracts/contracts.module';
+import { Position } from '../../database/entities/position.entity';
+import { Trade } from '../../database/entities/trade.entity';
+import { Market } from '../../database/entities/market.entity';
 import { AuthModule } from '../auth/auth.module';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([
       User,
+      CreatorShare,
       ShareTransaction,
-      MarketPosition,
-      MarketTrade,
-      DividendClaim,
+      Position,
+      Trade,
+      Market,
     ]),
-    ContractsModule,
     AuthModule,
   ],
   controllers: [UsersController],

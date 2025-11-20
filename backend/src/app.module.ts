@@ -10,13 +10,15 @@ import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { HealthModule } from './modules/health/health.module';
 import { AuthModule } from './modules/auth/auth.module';
+import { ContractsModule } from './contracts/contracts.module';
 import { UsersModule } from './modules/users/users.module';
 import { CreatorsModule } from './modules/creators/creators.module';
-import { SharesModule } from './modules/shares/shares.module';
 import { MarketsModule } from './modules/markets/markets.module';
+import { SharesModule } from './modules/shares/shares.module';
+import { AdminModule } from './modules/admin/admin.module';
+import { NotificationsModule } from './modules/notifications/notifications.module';
+import { AnalyticsModule } from './modules/analytics/analytics.module';
 import { DividendsModule } from './modules/dividends/dividends.module';
-import { TwitterModule } from './modules/twitter/twitter.module';
-import { ContractsModule } from './contracts/contracts.module';
 
 // Configuration imports
 import appConfig from './config/app.config';
@@ -40,7 +42,8 @@ import twitterConfig from './config/twitter.config';
         jwtRefreshConfig,
         twitterConfig,
       ],
-      envFilePath: ['.env.local', '.env'],
+      envFilePath: process.env.NODE_ENV === 'production' ? [] : ['.env.local', '.env'],
+      ignoreEnvFile: process.env.NODE_ENV === 'production',
       cache: true,
     }),
 
@@ -96,13 +99,15 @@ import twitterConfig from './config/twitter.config';
     // Feature Modules
     HealthModule,
     AuthModule,
+    ContractsModule,
     UsersModule,
     CreatorsModule,
-    SharesModule,
     MarketsModule,
+    SharesModule,
+    AdminModule,
+    NotificationsModule,
+    AnalyticsModule,
     DividendsModule,
-    TwitterModule,
-    ContractsModule,
   ],
   controllers: [AppController],
   providers: [

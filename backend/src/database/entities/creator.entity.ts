@@ -18,6 +18,7 @@ import { OpinionMarket } from './opinion-market.entity';
 import { DividendEpoch } from './dividend-epoch.entity';
 import { DividendClaim } from './dividend-claim.entity';
 import { CreatorVolumeTracking } from './creator-volume-tracking.entity';
+import { Market } from './market.entity';
 
 @Entity('creators')
 @Index(['twitterHandle'])
@@ -97,7 +98,10 @@ export class Creator {
   shareTransactions: ShareTransaction[];
 
   @OneToMany(() => OpinionMarket, (market) => market.creator)
-  markets: OpinionMarket[];
+  opinionMarkets: OpinionMarket[];
+
+  @OneToMany(() => Market, (market) => market.creator)
+  markets: Market[];
 
   @OneToMany(() => DividendEpoch, (epoch) => epoch.creator)
   dividendEpochs: DividendEpoch[];

@@ -1,25 +1,13 @@
+import { IsOptional, IsString, IsEthereumAddress } from 'class-validator';
 import { ApiPropertyOptional } from '@nestjs/swagger';
-import { IsOptional, IsString, IsUrl, MaxLength, IsEthereumAddress } from 'class-validator';
 
 export class UpdateUserDto {
-  @ApiPropertyOptional({ description: 'User display name', maxLength: 100 })
+  @ApiPropertyOptional({ description: 'User bio/description' })
   @IsOptional()
   @IsString()
-  @MaxLength(100)
-  displayName?: string;
-
-  @ApiPropertyOptional({ description: 'User bio/description', maxLength: 500 })
-  @IsOptional()
-  @IsString()
-  @MaxLength(500)
   bio?: string;
 
-  @ApiPropertyOptional({ description: 'Profile picture URL' })
-  @IsOptional()
-  @IsUrl()
-  profilePictureUrl?: string;
-
-  @ApiPropertyOptional({ description: 'Wallet address for payments' })
+  @ApiPropertyOptional({ description: 'Ethereum wallet address' })
   @IsOptional()
   @IsEthereumAddress()
   walletAddress?: string;

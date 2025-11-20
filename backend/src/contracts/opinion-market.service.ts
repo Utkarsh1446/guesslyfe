@@ -7,13 +7,12 @@ export interface MarketInfo {
   creator: string;
   question: string;
   endTime: bigint;
-  totalLiquidity: bigint;
-  liquidityFormatted: string;
-  yesShares: bigint;
-  noShares: bigint;
-  isResolved: boolean;
-  winningOutcome: boolean | null;
-  shareContractAddress: string;
+  liquidityPool: string;
+  totalYesShares: string;
+  totalNoShares: string;
+  resolved: boolean;
+  winningOutcome: boolean;
+  cancelled: boolean;
 }
 
 export interface UserPosition {
@@ -55,13 +54,12 @@ export class OpinionMarketService {
         creator: market.creator,
         question: market.question,
         endTime: market.endTime,
-        totalLiquidity: market.totalLiquidity,
-        liquidityFormatted: this.contractsService.formatUSDC(market.totalLiquidity),
-        yesShares: market.yesShares,
-        noShares: market.noShares,
-        isResolved: market.isResolved,
-        winningOutcome: market.isResolved ? market.winningOutcome : null,
-        shareContractAddress: market.shareContract,
+        liquidityPool: this.contractsService.formatUSDC(market.totalLiquidity),
+        totalYesShares: this.contractsService.formatToken(market.yesShares),
+        totalNoShares: this.contractsService.formatToken(market.noShares),
+        resolved: market.isResolved || false,
+        winningOutcome: market.isResolved ? market.winningOutcome : false,
+        cancelled: market.isCancelled || false,
       };
     } catch (error) {
       this.logger.error(`Failed to get market info for market ${marketId}: ${error.message}`);
@@ -103,8 +101,8 @@ export class OpinionMarketService {
     try {
       const marketInfo = await this.getMarketInfo(marketId);
 
-      const yesShares = Number(marketInfo.yesShares);
-      const noShares = Number(marketInfo.noShares);
+      const yesShares = parseFloat(marketInfo.totalYesShares);
+      const noShares = parseFloat(marketInfo.totalNoShares);
 
       // AMM probability calculation: P(YES) = NO_shares / (YES_shares + NO_shares)
       const totalShares = yesShares + noShares;
@@ -124,8 +122,8 @@ export class OpinionMarketService {
       return {
         yesProbability: Math.round(yesProbability * 100) / 100, // Round to 2 decimals
         noProbability: Math.round(noProbability * 100) / 100,
-        yesShares: marketInfo.yesShares,
-        noShares: marketInfo.noShares,
+        yesShares: BigInt(yesShares * 1e6),
+        noShares: BigInt(noShares * 1e6),
       };
     } catch (error) {
       this.logger.error(`Failed to calculate probabilities for market ${marketId}: ${error.message}`);
@@ -197,7 +195,7 @@ export class OpinionMarketService {
         this.getUserPosition(marketId, userAddress),
       ]);
 
-      if (!marketInfo.isResolved) {
+      if (!marketInfo.resolved) {
         return BigInt(0);
       }
 
@@ -247,7 +245,7 @@ export class OpinionMarketService {
       if (callbacks.onMarketCreated) {
         contract.on('MarketCreated', (marketId, creator, question, endTime, timestamp) => {
           this.logger.log(`MarketCreated: ${marketId} by ${creator} - "${question}"`);
-          callbacks.onMarketCreated(marketId, creator, question, endTime);
+          callbacks.onMarketCreated?.(marketId, creator, question, endTime);
         });
       }
 
@@ -255,7 +253,7 @@ export class OpinionMarketService {
       if (callbacks.onBetPlaced) {
         contract.on('BetPlaced', (marketId, user, isYes, amount, cost, timestamp) => {
           this.logger.log(`BetPlaced: Market ${marketId}, User ${user}, ${isYes ? 'YES' : 'NO'}, Amount ${amount}`);
-          callbacks.onBetPlaced(marketId, user, isYes, amount, cost);
+          callbacks.onBetPlaced?.(marketId, user, isYes, amount, cost);
         });
       }
 
@@ -263,7 +261,7 @@ export class OpinionMarketService {
       if (callbacks.onMarketResolved) {
         contract.on('MarketResolved', (marketId, winningOutcome, timestamp) => {
           this.logger.log(`MarketResolved: ${marketId} -> ${winningOutcome ? 'YES' : 'NO'}`);
-          callbacks.onMarketResolved(marketId, winningOutcome, timestamp);
+          callbacks.onMarketResolved?.(marketId, winningOutcome, timestamp);
         });
       }
 
@@ -271,7 +269,7 @@ export class OpinionMarketService {
       if (callbacks.onWinningsClaimed) {
         contract.on('WinningsClaimed', (marketId, user, payout, timestamp) => {
           this.logger.log(`WinningsClaimed: Market ${marketId}, User ${user}, Payout ${payout}`);
-          callbacks.onWinningsClaimed(marketId, user, payout);
+          callbacks.onWinningsClaimed?.(marketId, user, payout);
         });
       }
 

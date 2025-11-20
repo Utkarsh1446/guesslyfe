@@ -2,24 +2,20 @@ import { Module } from '@nestjs/common';
 import { TypeOrmModule } from '@nestjs/typeorm';
 import { DividendsController } from './dividends.controller';
 import { DividendsService } from './dividends.service';
-import { DividendEpoch } from '../../database/entities/dividend-epoch.entity';
-import { ClaimableDividend } from '../../database/entities/claimable-dividend.entity';
 import { DividendClaim } from '../../database/entities/dividend-claim.entity';
+import { DividendEpoch } from '../../database/entities/dividend-epoch.entity';
+import { CreatorShare } from '../../database/entities/creator-share.entity';
 import { Creator } from '../../database/entities/creator.entity';
-import { User } from '../../database/entities/user.entity';
-import { ContractsModule } from '../../contracts/contracts.module';
 import { AuthModule } from '../auth/auth.module';
 
 @Module({
   imports: [
     TypeOrmModule.forFeature([
-      DividendEpoch,
-      ClaimableDividend,
       DividendClaim,
+      DividendEpoch,
+      CreatorShare,
       Creator,
-      User,
     ]),
-    ContractsModule,
     AuthModule,
   ],
   controllers: [DividendsController],

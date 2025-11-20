@@ -11,11 +11,13 @@ export class BlockchainService implements OnModuleInit {
   private config: BlockchainConfig;
 
   constructor(private readonly configService: ConfigService) {
-    this.config = this.configService.get<BlockchainConfig>('blockchain');
+    const config = this.configService.get<BlockchainConfig>('blockchain');
 
-    if (!this.config) {
+    if (!config) {
       throw new Error('Blockchain configuration is missing');
     }
+
+    this.config = config;
 
     // Initialize provider
     this.provider = new ethers.JsonRpcProvider(this.config.rpcUrl);

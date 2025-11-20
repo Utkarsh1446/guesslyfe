@@ -66,6 +66,10 @@ export class AuthService {
     const clientSecret = this.configService.get<string>('twitter.clientSecret');
     const redirectUri = this.configService.get<string>('twitter.callbackUrl');
 
+    if (!clientId || !clientSecret || !redirectUri) {
+      throw new Error('Twitter OAuth configuration is missing');
+    }
+
     const params = new URLSearchParams({
       code,
       grant_type: 'authorization_code',
@@ -136,10 +140,8 @@ export class AuthService {
       relations: ['creator'],
     });
 
-    const encryptedAccessToken = this.encryptToken(tokens.access_token);
-    const encryptedRefreshToken = tokens.refresh_token
-      ? this.encryptToken(tokens.refresh_token)
-      : null;
+    // Note: tokens are used during OAuth flow but not stored in database
+    // If needed for Twitter API calls, store encrypted tokens in Redis session
 
     const adminTwitterId = this.configService.get<string>('app.adminTwitterId');
     const isAdmin = profile.id === adminTwitterId;
@@ -151,8 +153,6 @@ export class AuthService {
       user.profilePictureUrl = profile.profile_image_url;
       user.followerCount = profile.public_metrics.followers_count;
       user.followingCount = profile.public_metrics.following_count;
-      user.twitterAccessToken = encryptedAccessToken;
-      user.twitterRefreshToken = encryptedRefreshToken;
       user.isAdmin = isAdmin;
 
       await this.userRepository.save(user);
@@ -166,14 +166,15 @@ export class AuthService {
         profilePictureUrl: profile.profile_image_url,
         followerCount: profile.public_metrics.followers_count,
         followingCount: profile.public_metrics.following_count,
-        twitterAccessToken: encryptedAccessToken,
-        twitterRefreshToken: encryptedRefreshToken,
         isAdmin,
       });
 
       await this.userRepository.save(user);
       this.logger.log(`Created new user: ${user.twitterHandle}`);
     }
+
+    // TODO: Store encrypted tokens in Redis if needed for Twitter API calls
+    // For now, tokens are only used during auth flow
 
     return user;
   }

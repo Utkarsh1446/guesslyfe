@@ -37,7 +37,12 @@ export class EventListenerService implements OnModuleInit, OnModuleDestroy {
 
   async onModuleInit() {
     // Auto-start listeners on module initialization
-    await this.startListeners();
+    try {
+      await this.startListeners();
+    } catch (error) {
+      this.logger.warn(`Event listeners could not start (likely missing contract config): ${error.message}`);
+      // Don't throw - allow app to start without event listeners in development
+    }
   }
 
   onModuleDestroy() {
@@ -72,7 +77,7 @@ export class EventListenerService implements OnModuleInit, OnModuleDestroy {
       this.startReorgMonitor();
     } catch (error) {
       this.logger.error(`Failed to start event listeners: ${error.message}`);
-      throw error;
+      throw error; // Re-throw to be caught by onModuleInit
     }
   }
 

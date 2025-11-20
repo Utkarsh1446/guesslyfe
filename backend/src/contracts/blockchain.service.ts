@@ -323,7 +323,6 @@ export class BlockchainService {
   async getNetworkInfo(): Promise<{
     name: string;
     chainId: bigint;
-    ensAddress: string | null;
   }> {
     try {
       const provider = this.contractsService.getProvider();
@@ -332,7 +331,6 @@ export class BlockchainService {
       return {
         name: network.name,
         chainId: network.chainId,
-        ensAddress: network.ensAddress || null,
       };
     } catch (error) {
       this.logger.error(`Failed to get network info: ${error.message}`);

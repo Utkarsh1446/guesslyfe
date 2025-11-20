@@ -1,419 +1,529 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
-import { InjectRepository } from '@nestjs/typeorm';
-import { Repository, MoreThan } from 'typeorm';
-import { OpinionMarket } from '../../database/entities/opinion-market.entity';
-import { MarketPosition } from '../../database/entities/market-position.entity';
-import { MarketTrade } from '../../database/entities/market-trade.entity';
-import { Creator } from '../../database/entities/creator.entity';
-import { User } from '../../database/entities/user.entity';
-import { OpinionMarketService } from '../../contracts/opinion-market.service';
 import {
+  Injectable,
+  Logger,
+  NotFoundException,
+  BadRequestException,
+  ForbiddenException,
+} from '@nestjs/common';
+import { InjectRepository } from '@nestjs/typeorm';
+import { Repository, Like, In } from 'typeorm';
+import { Market } from '../../database/entities/market.entity';
+import { Outcome } from '../../database/entities/outcome.entity';
+import { Position } from '../../database/entities/position.entity';
+import { Trade } from '../../database/entities/trade.entity';
+import { Creator } from '../../database/entities/creator.entity';
+import { MarketStatus } from '../../database/enums';
+import {
+  CreateMarketDto,
+  MarketFiltersDto,
+  TradeMarketDto,
   MarketResponseDto,
-  MarketPriceQuoteDto,
-  MarketPositionDto,
-  MarketTradeDto,
-  TrendingMarketDto,
-} from './dto/market-response.dto';
+  MarketListResponseDto,
+  CreateMarketResponseDto,
+  PositionResponseDto,
+  UserPositionsResponseDto,
+  TradeResponseDto,
+  TradeListResponseDto,
+  UnsignedTransactionResponseDto,
+  MarketSortBy,
+} from './dto';
+import { OpinionMarketService } from '../../contracts/opinion-market.service';
 
 @Injectable()
 export class MarketsService {
+  private readonly logger = new Logger(MarketsService.name);
+
   constructor(
-    @InjectRepository(OpinionMarket)
-    private readonly opinionMarketRepository: Repository<OpinionMarket>,
-    @InjectRepository(MarketPosition)
-    private readonly marketPositionRepository: Repository<MarketPosition>,
-    @InjectRepository(MarketTrade)
-    private readonly marketTradeRepository: Repository<MarketTrade>,
+    @InjectRepository(Market)
+    private readonly marketRepository: Repository<Market>,
+    @InjectRepository(Outcome)
+    private readonly outcomeRepository: Repository<Outcome>,
+    @InjectRepository(Position)
+    private readonly positionRepository: Repository<Position>,
+    @InjectRepository(Trade)
+    private readonly tradeRepository: Repository<Trade>,
     @InjectRepository(Creator)
     private readonly creatorRepository: Repository<Creator>,
-    @InjectRepository(User)
-    private readonly userRepository: Repository<User>,
     private readonly opinionMarketService: OpinionMarketService,
   ) {}
 
   /**
-   * Get all markets with filtering and pagination
+   * Create a new market
    */
-  async getAllMarkets(
-    status?: 'ACTIVE' | 'RESOLVED' | 'CANCELLED',
-    page: number = 1,
-    limit: number = 20,
-  ): Promise<{ markets: MarketResponseDto[]; total: number; page: number; totalPages: number }> {
-    const queryBuilder = this.opinionMarketRepository
-      .createQueryBuilder('market')
-      .leftJoinAndSelect('market.creator', 'creator')
-      .leftJoinAndSelect('creator.user', 'user')
-      .orderBy('market.createdAt', 'DESC');
+  async createMarket(
+    creatorId: string,
+    createDto: CreateMarketDto,
+  ): Promise<CreateMarketResponseDto> {
+    this.logger.log(`Creating market for creator ${creatorId}`);
 
-    // Note: Status filtering will be done after fetching on-chain data
+    // Validate creator exists and is approved
+    const creator = await this.creatorRepository.findOne({
+      where: { id: creatorId },
+    });
 
-    const [markets, total] = await queryBuilder
-      .skip((page - 1) * limit)
-      .take(limit)
-      .getManyAndCount();
-
-    const marketResponses: MarketResponseDto[] = [];
-
-    for (const market of markets) {
-      const marketDto = await this.buildMarketResponse(market);
-
-      // Apply status filter if specified
-      if (status && marketDto.status !== status) continue;
-
-      marketResponses.push(marketDto);
+    if (!creator) {
+      throw new NotFoundException('Creator not found');
     }
 
+    // Validate outcomes sum to 100
+    const totalProbability = createDto.outcomes.reduce(
+      (sum, outcome) => sum + outcome.initialProbability,
+      0,
+    );
+
+    if (totalProbability !== 100) {
+      throw new BadRequestException(
+        'Sum of outcome probabilities must equal 100',
+      );
+    }
+
+    // Calculate end time
+    const endTime = new Date(Date.now() + createDto.duration * 1000);
+
+    // Create market in database first
+    const market = this.marketRepository.create({
+      title: createDto.title,
+      description: createDto.description,
+      category: createDto.category,
+      creatorId,
+      duration: createDto.duration,
+      endTime,
+      resolutionCriteria: createDto.resolutionCriteria,
+      evidenceLinks: createDto.evidenceLinks,
+      tags: createDto.tags,
+      status: MarketStatus.ACTIVE,
+    });
+
+    const savedMarket = await this.marketRepository.save(market);
+
+    // Create outcomes
+    const outcomes = createDto.outcomes.map((outcomeDto, index) =>
+      this.outcomeRepository.create({
+        marketId: savedMarket.id,
+        outcomeIndex: index,
+        text: outcomeDto.text,
+        initialProbability: outcomeDto.initialProbability.toString(),
+        currentProbability: outcomeDto.initialProbability.toString(),
+      }),
+    );
+
+    await this.outcomeRepository.save(outcomes);
+
+    // TODO: Create market on blockchain
+    // For now, just save to database without blockchain deployment
+    // The blockchain integration will be added in a future update
+    this.logger.log(
+      `Market created in database: ${savedMarket.id} (blockchain deployment pending)`,
+    );
+
+    // Load complete market with relations
+    const completeMarket = await this.getMarketById(savedMarket.id);
+
     return {
-      markets: marketResponses,
-      total: marketResponses.length,
-      page,
-      totalPages: Math.ceil(marketResponses.length / limit),
+      marketId: savedMarket.id,
+      contractAddress: savedMarket.contractAddress ?? undefined,
+      txHash: savedMarket.txHash ?? undefined,
+      market: completeMarket,
     };
   }
 
   /**
-   * Get market by ID
+   * Get markets with filters and pagination
    */
-  async getMarketById(marketId: string): Promise<MarketResponseDto> {
-    const market = await this.opinionMarketRepository.findOne({
-      where: { marketId },
-      relations: ['creator', 'creator.user'],
-    });
+  async getMarkets(
+    filters: MarketFiltersDto,
+  ): Promise<MarketListResponseDto> {
+    const {
+      status,
+      category,
+      creatorId,
+      search,
+      sort = MarketSortBy.CREATED_AT,
+      order = 'DESC',
+      page = 1,
+      limit = 10,
+    } = filters;
 
-    if (!market) {
-      throw new NotFoundException(`Market with ID ${marketId} not found`);
+    const queryBuilder = this.marketRepository
+      .createQueryBuilder('market')
+      .leftJoinAndSelect('market.creator', 'creator')
+      .leftJoinAndSelect('creator.user', 'user')
+      .leftJoinAndSelect('market.outcomes', 'outcomes');
+
+    // Apply filters
+    if (status) {
+      queryBuilder.andWhere('market.status = :status', { status });
     }
 
-    return this.buildMarketResponse(market);
+    if (category) {
+      queryBuilder.andWhere('market.category = :category', { category });
+    }
+
+    if (creatorId) {
+      queryBuilder.andWhere('market.creatorId = :creatorId', { creatorId });
+    }
+
+    if (search) {
+      queryBuilder.andWhere(
+        '(market.title ILIKE :search OR market.description ILIKE :search)',
+        { search: `%${search}%` },
+      );
+    }
+
+    // Apply sorting
+    queryBuilder.orderBy(`market.${sort}`, order);
+
+    // Apply pagination
+    const skip = (page - 1) * limit;
+    queryBuilder.skip(skip).take(limit);
+
+    const [markets, total] = await queryBuilder.getManyAndCount();
+
+    return {
+      markets: markets.map((market) => this.mapToResponseDto(market)),
+      total,
+      page,
+      limit,
+      totalPages: Math.ceil(total / limit),
+    };
   }
 
   /**
-   * Get price quote for betting on YES or NO
-   * NOTE: This is READ-ONLY. Actual betting happens on frontend via user's wallet.
+   * Get market by ID with full details
    */
-  async getBetPriceQuote(
-    marketId: string,
-    outcome: 'YES' | 'NO',
-    betAmount: number,
-  ): Promise<MarketPriceQuoteDto> {
-    const market = await this.opinionMarketRepository.findOne({
-      where: { marketId },
+  async getMarketById(id: string): Promise<MarketResponseDto> {
+    const market = await this.marketRepository.findOne({
+      where: { id },
+      relations: ['creator', 'creator.user', 'outcomes'],
     });
 
     if (!market) {
-      throw new NotFoundException(`Market with ID ${marketId} not found`);
+      throw new NotFoundException('Market not found');
     }
 
-    // Get current market info from blockchain
-    const marketInfo = await this.opinionMarketService.getMarketInfo(BigInt(marketId));
-
-    if (marketInfo.resolved || marketInfo.cancelled) {
-      throw new Error('Market is not active');
-    }
-
-    // Get current probabilities
-    const currentProbs = await this.opinionMarketService.getOutcomeProbabilities(BigInt(marketId));
-
-    // Calculate shares received using AMM formula
-    // For simplicity, we'll estimate: shares ≈ betAmount / currentPrice
-    const betAmountInUnits = BigInt(betAmount) * BigInt(1e6);
-    const totalShares = BigInt(marketInfo.totalYesShares) + BigInt(marketInfo.totalNoShares);
-
-    let expectedShares: bigint;
-    let newYesShares = BigInt(marketInfo.totalYesShares);
-    let newNoShares = BigInt(marketInfo.totalNoShares);
-
-    if (outcome === 'YES') {
-      // Buying YES shares increases YES shares in the pool
-      expectedShares = betAmountInUnits; // Simplified: 1 USDC = 1 share
-      newYesShares += expectedShares;
-    } else {
-      // Buying NO shares increases NO shares in the pool
-      expectedShares = betAmountInUnits;
-      newNoShares += expectedShares;
-    }
-
-    // Calculate new probabilities
-    const newTotalShares = newYesShares + newNoShares;
-    const newYesProbability = newTotalShares > BigInt(0)
-      ? Number((newNoShares * BigInt(10000)) / newTotalShares) / 100
-      : 50;
-    const newNoProbability = 100 - newYesProbability;
-
-    const pricePerShare = betAmountInUnits / expectedShares;
-
-    return new MarketPriceQuoteDto({
-      marketId,
-      outcome,
-      betAmount: betAmount.toString(),
-      expectedShares: this.formatUSDC(expectedShares),
-      pricePerShare: this.formatUSDC(pricePerShare * BigInt(1e6)),
-      currentProbability: outcome === 'YES' ? currentProbs.yesProbability : currentProbs.noProbability,
-      newProbability: outcome === 'YES' ? newYesProbability : newNoProbability,
-    });
+    return this.mapToResponseDto(market);
   }
 
   /**
-   * Get all positions for a market
+   * Get user's position in a market
    */
-  async getMarketPositions(
+  async getUserPosition(
     marketId: string,
-    limit: number = 50,
-    offset: number = 0,
-  ): Promise<MarketPositionDto[]> {
-    const market = await this.opinionMarketRepository.findOne({
-      where: { marketId },
+    walletAddress: string,
+  ): Promise<UserPositionsResponseDto> {
+    const market = await this.marketRepository.findOne({
+      where: { id: marketId },
     });
 
     if (!market) {
-      throw new NotFoundException(`Market with ID ${marketId} not found`);
+      throw new NotFoundException('Market not found');
     }
 
-    const positions = await this.marketPositionRepository.find({
-      where: { opinionMarket: { marketId } },
-      order: { lastUpdated: 'DESC' },
-      take: limit,
-      skip: offset,
+    const positions = await this.positionRepository.find({
+      where: { marketId, walletAddress },
+      relations: ['outcome'],
     });
 
-    const marketInfo = await this.opinionMarketService.getMarketInfo(BigInt(marketId));
-    const probabilities = await this.opinionMarketService.getOutcomeProbabilities(BigInt(marketId));
+    let totalValue = 0;
+    let totalCostBasis = 0;
+    let realizedPnl = 0;
 
-    const positionDtos: MarketPositionDto[] = [];
+    const positionDtos = positions.map((position) => {
+      const shares = parseFloat(position.shares);
+      const costBasis = parseFloat(position.costBasis);
+      const avgPrice = parseFloat(position.averagePrice);
 
-    for (const position of positions) {
-      // Try to find user by wallet address
-      const user = await this.userRepository.findOne({
-        where: { walletAddress: position.userAddress.toLowerCase() },
-      });
+      totalCostBasis += costBasis;
+      realizedPnl += parseFloat(position.realizedPnl);
 
-      const yesShares = BigInt(position.yesShares);
-      const noShares = BigInt(position.noShares);
-      const totalInvested = BigInt(position.totalInvested);
+      // Calculate current value based on current probability
+      const currentPrice =
+        parseFloat(position.outcome.currentProbability) / 100;
+      const currentValue = shares * currentPrice;
+      totalValue += currentValue;
 
-      // Calculate current value and claimable winnings
-      let currentValue = BigInt(0);
-      let claimableWinnings: string | undefined;
-
-      if (marketInfo.resolved) {
-        // Market resolved
-        const winningShares = marketInfo.winningOutcome ? yesShares : noShares;
-        const totalWinningShares = marketInfo.winningOutcome
-          ? BigInt(marketInfo.totalYesShares)
-          : BigInt(marketInfo.totalNoShares);
-
-        if (totalWinningShares > BigInt(0)) {
-          claimableWinnings = this.formatUSDC(
-            (winningShares * BigInt(marketInfo.liquidityPool)) / totalWinningShares,
-          );
-          currentValue = BigInt(claimableWinnings.replace('.', '').padEnd(6, '0'));
-        }
-      } else {
-        // Market active - estimate current value based on probabilities
-        currentValue =
-          (yesShares * BigInt(Math.floor(probabilities.yesProbability * 100)) +
-            noShares * BigInt(Math.floor(probabilities.noProbability * 100))) /
-          BigInt(100);
-      }
-
-      const profitLoss = currentValue - totalInvested;
-
-      positionDtos.push({
+      return {
         id: position.id,
-        userAddress: position.userAddress,
-        userHandle: user?.twitterHandle,
-        yesShares: this.formatUSDC(yesShares),
-        noShares: this.formatUSDC(noShares),
-        totalInvested: this.formatUSDC(totalInvested),
-        currentValue: this.formatUSDC(currentValue),
-        profitLoss: this.formatUSDC(profitLoss),
-        claimableWinnings,
-        lastUpdated: position.lastUpdated,
-      });
-    }
+        marketId: position.marketId,
+        userId: position.userId,
+        outcomeId: position.outcomeId,
+        outcome: {
+          id: position.outcome.id,
+          marketId: position.outcome.marketId,
+          outcomeIndex: position.outcome.outcomeIndex,
+          text: position.outcome.text,
+          initialProbability: position.outcome.initialProbability,
+          currentProbability: position.outcome.currentProbability,
+          totalShares: position.outcome.totalShares,
+          totalStaked: position.outcome.totalStaked,
+          createdAt: position.outcome.createdAt.toISOString(),
+          updatedAt: position.outcome.updatedAt.toISOString(),
+        },
+        walletAddress: position.walletAddress,
+        shares: position.shares,
+        costBasis: position.costBasis,
+        averagePrice: position.averagePrice,
+        realizedPnl: position.realizedPnl,
+        claimed: position.claimed,
+        claimedAmount: position.claimedAmount ?? undefined,
+        claimedAt: position.claimedAt?.toISOString(),
+        createdAt: position.createdAt.toISOString(),
+        updatedAt: position.updatedAt.toISOString(),
+      };
+    });
 
-    return positionDtos;
+    const unrealizedPnl = totalValue - totalCostBasis;
+
+    return {
+      positions: positionDtos,
+      totalValue: totalValue.toFixed(6),
+      totalCostBasis: totalCostBasis.toFixed(6),
+      unrealizedPnl: unrealizedPnl.toFixed(6),
+      realizedPnl: realizedPnl.toFixed(6),
+    };
   }
 
   /**
-   * Get trading history for a market
+   * Get market trades
    */
   async getMarketTrades(
     marketId: string,
-    limit: number = 50,
-    offset: number = 0,
-  ): Promise<MarketTradeDto[]> {
-    const market = await this.opinionMarketRepository.findOne({
-      where: { marketId },
+    page: number = 1,
+    limit: number = 20,
+  ): Promise<TradeListResponseDto> {
+    const market = await this.marketRepository.findOne({
+      where: { id: marketId },
     });
 
     if (!market) {
-      throw new NotFoundException(`Market with ID ${marketId} not found`);
+      throw new NotFoundException('Market not found');
     }
 
-    const trades = await this.marketTradeRepository.find({
-      where: { opinionMarket: { marketId } },
-      order: { timestamp: 'DESC' },
-      take: limit,
-      skip: offset,
-    });
+    const skip = (page - 1) * limit;
 
-    const tradeDtos: MarketTradeDto[] = [];
-
-    for (const trade of trades) {
-      // Try to find user by wallet address
-      const user = await this.userRepository.findOne({
-        where: { walletAddress: trade.userAddress.toLowerCase() },
-      });
-
-      const amount = BigInt(trade.amount);
-      const shares = BigInt(trade.sharesPurchased);
-      const pricePerShare = shares > BigInt(0) ? amount / shares : BigInt(0);
-
-      tradeDtos.push({
-        id: trade.id,
-        traderAddress: trade.userAddress,
-        traderHandle: user?.twitterHandle,
-        outcome: trade.outcome,
-        amount: this.formatUSDC(amount),
-        sharesPurchased: this.formatUSDC(shares),
-        pricePerShare: this.formatUSDC(pricePerShare),
-        transactionHash: trade.transactionHash,
-        blockNumber: trade.blockNumber,
-        timestamp: trade.timestamp,
-      });
-    }
-
-    return tradeDtos;
-  }
-
-  /**
-   * Get trending markets by 24h volume
-   */
-  async getTrendingMarkets(limit: number = 10): Promise<TrendingMarketDto[]> {
-    const oneDayAgo = new Date(Date.now() - 24 * 60 * 60 * 1000);
-
-    const markets = await this.opinionMarketRepository.find({
-      relations: ['creator', 'creator.user'],
+    const [trades, total] = await this.tradeRepository.findAndCount({
+      where: { marketId },
       order: { createdAt: 'DESC' },
+      skip,
+      take: limit,
     });
 
-    const trending: TrendingMarketDto[] = [];
-
-    for (const market of markets) {
-      // Get 24h trades
-      const trades24h = await this.marketTradeRepository.find({
-        where: {
-          opinionMarket: { marketId: market.marketId },
-          timestamp: MoreThan(oneDayAgo),
-        },
-      });
-
-      if (trades24h.length === 0) continue;
-
-      // Calculate 24h volume
-      let volume24h = BigInt(0);
-      const uniqueTraders = new Set<string>();
-
-      for (const trade of trades24h) {
-        volume24h += BigInt(trade.amount);
-        uniqueTraders.add(trade.userAddress.toLowerCase());
-      }
-
-      // Get market info
-      const marketInfo = await this.opinionMarketService.getMarketInfo(BigInt(market.marketId));
-      if (marketInfo.resolved || marketInfo.cancelled) continue;
-
-      const probabilities = await this.opinionMarketService.getOutcomeProbabilities(
-        BigInt(market.marketId),
-      );
-
-      // Calculate time remaining
-      const now = Date.now();
-      const endTime = market.endTime.getTime();
-      const hoursRemaining = Math.max(0, Math.floor((endTime - now) / (1000 * 60 * 60)));
-
-      trending.push({
-        marketId: market.marketId,
-        question: market.question,
-        creatorAddress: market.creatorAddress,
-        creatorHandle: market.creator.user.twitterHandle,
-        volume24h: this.formatUSDC(volume24h),
-        traders24h: uniqueTraders.size,
-        yesProbability: probabilities.yesProbability,
-        totalLiquidity: this.formatUSDC(BigInt(marketInfo.liquidityPool)),
-        endTime: market.endTime,
-        hoursRemaining,
-      });
-    }
-
-    // Sort by 24h volume (descending)
-    trending.sort((a, b) => parseFloat(b.volume24h) - parseFloat(a.volume24h));
-
-    return trending.slice(0, limit);
+    return {
+      trades: trades.map((trade) => ({
+        id: trade.id,
+        marketId: trade.marketId,
+        userId: trade.userId,
+        outcomeId: trade.outcomeId,
+        walletAddress: trade.walletAddress,
+        action: trade.action as any, // TradeAction and TradeActionResponse have same values
+        shares: trade.shares,
+        amount: trade.amount,
+        price: trade.price,
+        fee: trade.fee,
+        txHash: trade.txHash ?? undefined,
+        blockNumber: trade.blockNumber ?? undefined,
+        blockTimestamp: trade.blockTimestamp?.toISOString(),
+        createdAt: trade.createdAt.toISOString(),
+      })),
+      total,
+      page,
+      limit,
+    };
   }
 
   /**
-   * Helper: Build market response DTO
+   * Prepare trade transaction (returns unsigned tx)
    */
-  private async buildMarketResponse(market: OpinionMarket): Promise<MarketResponseDto> {
-    // Get on-chain market info
-    const marketInfo = await this.opinionMarketService.getMarketInfo(BigInt(market.marketId));
-    const probabilities = await this.opinionMarketService.getOutcomeProbabilities(
-      BigInt(market.marketId),
+  async prepareTrade(
+    marketId: string,
+    userId: string,
+    walletAddress: string,
+    tradeDto: TradeMarketDto,
+  ): Promise<UnsignedTransactionResponseDto> {
+    const market = await this.marketRepository.findOne({
+      where: { id: marketId },
+      relations: ['outcomes'],
+    });
+
+    if (!market) {
+      throw new NotFoundException('Market not found');
+    }
+
+    if (market.status !== MarketStatus.ACTIVE) {
+      throw new BadRequestException('Market is not active');
+    }
+
+    if (new Date() > market.endTime) {
+      throw new BadRequestException('Market has ended');
+    }
+
+    const outcome = market.outcomes.find(
+      (o) => o.outcomeIndex === tradeDto.outcome,
     );
 
-    // Calculate total volume
-    const totalVolume = await this.marketTradeRepository
-      .createQueryBuilder('trade')
-      .select('SUM(trade.amount)', 'total')
-      .where('trade.opinionMarketMarketId = :marketId', { marketId: market.marketId })
-      .getRawOne();
+    if (!outcome) {
+      throw new BadRequestException('Invalid outcome index');
+    }
 
-    // Count unique participants
-    const participantCount = await this.marketTradeRepository
-      .createQueryBuilder('trade')
-      .select('COUNT(DISTINCT trade.userAddress)', 'count')
-      .where('trade.opinionMarketMarketId = :marketId', { marketId: market.marketId })
-      .getRawOne();
+    // Calculate expected shares and fee
+    // This is simplified - you'd use AMM formulas in production
+    const amount = parseFloat(tradeDto.amount);
+    const currentPrice = parseFloat(outcome.currentProbability) / 100;
+    const fee = amount * 0.02; // 2% fee
+    const amountAfterFee = amount - fee;
 
-    const status = marketInfo.resolved
-      ? 'RESOLVED'
-      : marketInfo.cancelled
-      ? 'CANCELLED'
-      : 'ACTIVE';
+    let expectedShares: number;
+    let priceImpact: number;
 
-    return new MarketResponseDto({
-      marketId: market.marketId,
-      creatorAddress: market.creatorAddress,
-      creatorHandle: market.creator.user.twitterHandle,
-      creatorName: market.creator.user.displayName,
-      question: market.question,
-      description: market.description,
-      category: market.category,
-      endTime: market.endTime,
-      liquidityPool: this.formatUSDC(BigInt(marketInfo.liquidityPool)),
-      yesProbability: probabilities.yesProbability,
-      noProbability: probabilities.noProbability,
-      totalYesShares: this.formatUSDC(BigInt(marketInfo.totalYesShares)),
-      totalNoShares: this.formatUSDC(BigInt(marketInfo.totalNoShares)),
-      status,
-      resolved: marketInfo.resolved,
-      winningOutcome: marketInfo.resolved ? marketInfo.winningOutcome : undefined,
-      cancelled: marketInfo.cancelled,
-      totalVolume: this.formatUSDC(BigInt(totalVolume.total || '0')),
-      participantCount: parseInt(participantCount.count) || 0,
-      createdAt: market.createdAt,
-    });
+    if (tradeDto.action === 'buy') {
+      expectedShares = amountAfterFee / currentPrice;
+      priceImpact = 0.5; // Simplified - calculate based on liquidity
+    } else {
+      // For sell, user is selling shares
+      expectedShares = parseFloat(tradeDto.amount); // amount is in shares for sell
+      priceImpact = 0.5;
+    }
+
+    // Build unsigned transaction
+    // TODO: Get contract address from OpinionMarketService when method is available
+    const unsignedTx = {
+      to: market.contractAddress || '0x0000000000000000000000000000000000000000',
+      data: this.buildTradeCalldata(marketId, tradeDto),
+      value: '0', // USDC is ERC20, not native token
+    };
+
+    return {
+      unsignedTx,
+      expectedShares: expectedShares.toFixed(6),
+      fee: fee.toFixed(6),
+      priceImpact: priceImpact.toFixed(2),
+    };
   }
 
   /**
-   * Helper: Format USDC amount
+   * Prepare claim transaction (returns unsigned tx)
    */
-  private formatUSDC(amount: bigint): string {
-    const formatted = amount.toString().padStart(7, '0');
-    const dollars = formatted.slice(0, -6) || '0';
-    const cents = formatted.slice(-6);
-    return `${dollars}.${cents}`;
+  async prepareClaim(
+    marketId: string,
+    userId: string,
+    walletAddress: string,
+  ): Promise<UnsignedTransactionResponseDto> {
+    const market = await this.marketRepository.findOne({
+      where: { id: marketId },
+    });
+
+    if (!market) {
+      throw new NotFoundException('Market not found');
+    }
+
+    if (market.status !== MarketStatus.RESOLVED) {
+      throw new BadRequestException('Market is not resolved');
+    }
+
+    // Get user's winning position
+    const positions = await this.positionRepository.find({
+      where: {
+        marketId,
+        walletAddress,
+        claimed: false,
+      },
+      relations: ['outcome'],
+    });
+
+    const winningPosition = positions.find(
+      (p) => p.outcome.outcomeIndex === market.winningOutcomeIndex,
+    );
+
+    if (!winningPosition) {
+      throw new BadRequestException('No winning position to claim');
+    }
+
+    const winnings = parseFloat(winningPosition.shares);
+
+    // Build unsigned transaction
+    // TODO: Get contract address from OpinionMarketService when method is available
+    const unsignedTx = {
+      to: market.contractAddress || '0x0000000000000000000000000000000000000000',
+      data: this.buildClaimCalldata(marketId),
+      value: '0',
+    };
+
+    return {
+      unsignedTx,
+      expectedShares: '0',
+      fee: '0',
+      priceImpact: '0',
+    };
+  }
+
+  /**
+   * Helper: Map entity to response DTO
+   */
+  private mapToResponseDto(market: Market): MarketResponseDto {
+    return {
+      id: market.id,
+      title: market.title,
+      description: market.description,
+      category: market.category,
+      status: market.status,
+      contractAddress: market.contractAddress ?? undefined,
+      txHash: market.txHash ?? undefined,
+      creatorId: market.creatorId,
+      creator: market.creator
+        ? {
+            id: market.creator.id,
+            twitterHandle: market.creator.twitterHandle,
+            user: market.creator.user
+              ? {
+                  displayName: market.creator.user.displayName,
+                  profilePictureUrl: market.creator.user.profilePictureUrl,
+                }
+              : undefined,
+          }
+        : undefined,
+      endTime: market.endTime.toISOString(),
+      duration: market.duration,
+      resolutionCriteria: market.resolutionCriteria ?? undefined,
+      evidenceLinks: market.evidenceLinks ?? undefined,
+      tags: market.tags ?? undefined,
+      totalVolume: market.totalVolume,
+      totalLiquidity: market.totalLiquidity,
+      participantCount: market.participantCount,
+      tradeCount: market.tradeCount,
+      winningOutcomeIndex: market.winningOutcomeIndex ?? undefined,
+      resolvedAt: market.resolvedAt?.toISOString(),
+      createdAt: market.createdAt.toISOString(),
+      updatedAt: market.updatedAt.toISOString(),
+      outcomes: market.outcomes?.map((outcome) => ({
+        id: outcome.id,
+        marketId: outcome.marketId,
+        outcomeIndex: outcome.outcomeIndex,
+        text: outcome.text,
+        initialProbability: outcome.initialProbability,
+        currentProbability: outcome.currentProbability,
+        totalShares: outcome.totalShares,
+        totalStaked: outcome.totalStaked,
+        createdAt: outcome.createdAt.toISOString(),
+        updatedAt: outcome.updatedAt.toISOString(),
+      })),
+    };
+  }
+
+  /**
+   * Helper: Build trade calldata
+   */
+  private buildTradeCalldata(marketId: string, tradeDto: TradeMarketDto): string {
+    // This would use ethers.js to encode the function call
+    // Placeholder for now
+    return '0x';
+  }
+
+  /**
+   * Helper: Build claim calldata
+   */
+  private buildClaimCalldata(marketId: string): string {
+    // This would use ethers.js to encode the function call
+    // Placeholder for now
+    return '0x';
   }
 }

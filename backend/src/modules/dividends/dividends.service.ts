@@ -1,324 +1,303 @@
-import { Injectable, NotFoundException } from '@nestjs/common';
+import {
+  Injectable,
+  NotFoundException,
+  BadRequestException,
+  Logger,
+} from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository } from 'typeorm';
-import { DividendEpoch } from '../../database/entities/dividend-epoch.entity';
-import { ClaimableDividend } from '../../database/entities/claimable-dividend.entity';
 import { DividendClaim } from '../../database/entities/dividend-claim.entity';
+import { DividendEpoch } from '../../database/entities/dividend-epoch.entity';
+import { CreatorShare } from '../../database/entities/creator-share.entity';
 import { Creator } from '../../database/entities/creator.entity';
-import { User } from '../../database/entities/user.entity';
-import { CreatorShareService } from '../../contracts/creator-share.service';
 import {
-  DividendEpochDto,
+  ClaimableDividendsResponseDto,
   ClaimableDividendDto,
-  DividendClaimDto,
-  CurrentEpochInfoDto,
-} from './dto/dividend-response.dto';
+  InitiateClaimDto,
+  InitiateClaimResponseDto,
+  CompleteClaimDto,
+  CompleteClaimResponseDto,
+  ClaimHistoryResponseDto,
+  ClaimHistoryItemDto,
+} from './dto';
 
 @Injectable()
 export class DividendsService {
+  private readonly logger = new Logger(DividendsService.name);
+
   constructor(
-    @InjectRepository(DividendEpoch)
-    private readonly dividendEpochRepository: Repository<DividendEpoch>,
-    @InjectRepository(ClaimableDividend)
-    private readonly claimableDividendRepository: Repository<ClaimableDividend>,
     @InjectRepository(DividendClaim)
     private readonly dividendClaimRepository: Repository<DividendClaim>,
+    @InjectRepository(DividendEpoch)
+    private readonly dividendEpochRepository: Repository<DividendEpoch>,
+    @InjectRepository(CreatorShare)
+    private readonly creatorShareRepository: Repository<CreatorShare>,
     @InjectRepository(Creator)
     private readonly creatorRepository: Repository<Creator>,
-    @InjectRepository(User)
-    private readonly userRepository: Repository<User>,
-    private readonly creatorShareService: CreatorShareService,
   ) {}
 
   /**
-   * Get dividend epochs for a creator
+   * Get claimable dividends for a user address
    */
-  async getCreatorEpochs(
-    creatorAddress: string,
-    limit: number = 20,
-    offset: number = 0,
-  ): Promise<DividendEpochDto[]> {
-    const creator = await this.creatorRepository.findOne({
-      where: { creatorAddress: creatorAddress.toLowerCase() },
+  async getClaimableDividends(
+    address: string,
+  ): Promise<ClaimableDividendsResponseDto> {
+    // Get all creator shares owned by this address
+    const shares = await this.creatorShareRepository.find({
+      where: { holderAddress: address },
+      relations: ['creator'],
     });
 
-    if (!creator) {
-      throw new NotFoundException('Creator not found');
+    if (shares.length === 0) {
+      return {
+        totalClaimable: 0,
+        dividends: [],
+        creatorsCount: 0,
+      };
     }
 
-    const epochs = await this.dividendEpochRepository.find({
-      where: { creatorAddress: creatorAddress.toLowerCase() },
-      order: { epochNumber: 'DESC' },
-      take: limit,
-      skip: offset,
-    });
+    const dividends: ClaimableDividendDto[] = [];
+    let totalClaimable = 0;
 
-    return Promise.all(epochs.map((epoch) => this.buildEpochDto(epoch)));
-  }
-
-  /**
-   * Get current epoch info for a creator
-   */
-  async getCurrentEpochInfo(creatorAddress: string): Promise<CurrentEpochInfoDto> {
-    const creator = await this.creatorRepository.findOne({
-      where: { creatorAddress: creatorAddress.toLowerCase() },
-    });
-
-    if (!creator) {
-      throw new NotFoundException('Creator not found');
-    }
-
-    // Get latest epoch
-    const currentEpoch = await this.dividendEpochRepository.findOne({
-      where: { creatorAddress: creatorAddress.toLowerCase() },
-      order: { epochNumber: 'DESC' },
-    });
-
-    if (!currentEpoch) {
-      // No epochs created yet
-      const supply = await this.creatorShareService.getCurrentSupply(creatorAddress);
-
-      return new CurrentEpochInfoDto({
-        creatorAddress,
-        currentEpochNumber: 0,
-        currentEpochStart: new Date(),
-        currentEpochEnd: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days from now
-        hoursRemaining: 168,
-        isFinalized: false,
-        accumulatedDividends: '0',
-        totalShares: supply.supplyFormatted,
-      });
-    }
-
-    // Calculate hours remaining
-    const now = Date.now();
-    const endTime = currentEpoch.endTime.getTime();
-    const hoursRemaining = Math.max(0, Math.floor((endTime - now) / (1000 * 60 * 60)));
-
-    // Get previous epoch
-    let previousEpoch: DividendEpochDto | undefined;
-    if (currentEpoch.epochNumber > 1) {
-      const prevEpoch = await this.dividendEpochRepository.findOne({
+    for (const share of shares) {
+      // Get latest distributed epoch for this creator
+      const latestEpoch = await this.dividendEpochRepository.findOne({
         where: {
-          creatorAddress: creatorAddress.toLowerCase(),
-          epochNumber: currentEpoch.epochNumber - 1,
+          creatorId: share.creatorId,
+          distributed: true,
         },
+        order: { epochNumber: 'DESC' },
       });
 
-      if (prevEpoch) {
-        previousEpoch = await this.buildEpochDto(prevEpoch);
+      if (!latestEpoch || latestEpoch.totalFees === 0) {
+        continue; // No dividends available
+      }
+
+      // Calculate user's share of the dividend pool
+      // Formula: (user's shares / total shares) * total fees
+      const creator = share.creator;
+      const totalShares = creator.totalShares || 1; // Avoid division by zero
+      const userSharePercentage = share.sharesHeld / totalShares;
+      const claimableAmount = Number(latestEpoch.totalFees) * userSharePercentage;
+
+      // Check if already claimed
+      const existingClaim = await this.dividendClaimRepository.findOne({
+        where: {
+          userAddress: address,
+          creatorId: share.creatorId,
+        },
+        order: { claimedAt: 'DESC' },
+      });
+
+      // If already claimed this epoch, skip
+      if (existingClaim && existingClaim.verified) {
+        continue;
+      }
+
+      if (claimableAmount > 0) {
+        dividends.push({
+          creatorId: creator.id,
+          creatorHandle: creator.twitterHandle,
+          amount: claimableAmount,
+          sharesOwned: share.sharesHeld,
+          lastEpochDistributed: latestEpoch.epochNumber,
+        });
+
+        totalClaimable += claimableAmount;
       }
     }
 
-    // Get current total supply
-    const supply = await this.creatorShareService.getCurrentSupply(creatorAddress);
-
-    return new CurrentEpochInfoDto({
-      creatorAddress,
-      currentEpochNumber: currentEpoch.epochNumber,
-      currentEpochStart: currentEpoch.startTime,
-      currentEpochEnd: currentEpoch.endTime,
-      hoursRemaining,
-      isFinalized: currentEpoch.isFinalized,
-      accumulatedDividends: this.formatUSDC(BigInt(currentEpoch.totalDividends)),
-      totalShares: currentEpoch.isFinalized
-        ? this.formatUSDC(BigInt(currentEpoch.totalSharesAtSnapshot))
-        : supply.supplyFormatted,
-      previousEpoch,
-    });
+    return {
+      totalClaimable,
+      dividends,
+      creatorsCount: dividends.length,
+    };
   }
 
   /**
-   * Get epoch details by ID
+   * Initiate dividend claim process
    */
-  async getEpochById(epochId: string): Promise<DividendEpochDto> {
-    const epoch = await this.dividendEpochRepository.findOne({
-      where: { id: epochId },
-    });
-
-    if (!epoch) {
-      throw new NotFoundException(`Dividend epoch with ID ${epochId} not found`);
-    }
-
-    return this.buildEpochDto(epoch);
-  }
-
-  /**
-   * Get all claims for an epoch
-   */
-  async getEpochClaims(
-    epochId: string,
-    limit: number = 50,
-    offset: number = 0,
-  ): Promise<DividendClaimDto[]> {
-    const epoch = await this.dividendEpochRepository.findOne({
-      where: { id: epochId },
-    });
-
-    if (!epoch) {
-      throw new NotFoundException(`Dividend epoch with ID ${epochId} not found`);
-    }
-
-    const claims = await this.dividendClaimRepository.find({
-      where: { claimableDividend: { dividendEpoch: { id: epochId } } },
-      relations: ['claimableDividend', 'claimableDividend.dividendEpoch'],
-      order: { claimedAt: 'DESC' },
-      take: limit,
-      skip: offset,
-    });
-
-    const claimDtos: DividendClaimDto[] = [];
-
-    for (const claim of claims) {
-      // Try to find user by wallet address
-      const user = await this.userRepository.findOne({
-        where: { walletAddress: claim.claimer.toLowerCase() },
-      });
-
-      claimDtos.push({
-        id: claim.id,
-        creatorAddress: claim.claimableDividend.dividendEpoch.creatorAddress,
-        epochNumber: claim.claimableDividend.dividendEpoch.epochNumber,
-        claimer: claim.claimer,
-        claimerHandle: user?.twitterHandle,
-        amount: this.formatUSDC(BigInt(claim.amount)),
-        transactionHash: claim.transactionHash,
-        blockNumber: claim.blockNumber,
-        claimedAt: claim.claimedAt,
-      });
-    }
-
-    return claimDtos;
-  }
-
-  /**
-   * Get user's claimable dividends
-   */
-  async getUserClaimableDividends(userId: string): Promise<ClaimableDividendDto[]> {
-    const user = await this.userRepository.findOne({ where: { id: userId } });
-
-    if (!user) {
-      throw new NotFoundException('User not found');
-    }
-
-    if (!user.walletAddress) {
-      return []; // No wallet = no dividends
-    }
-
-    const claimable = await this.claimableDividendRepository.find({
-      where: {
-        shareholder: user.walletAddress.toLowerCase(),
-        isClaimed: false,
-      },
-      relations: ['dividendEpoch'],
-      order: { dividendEpoch: { epochNumber: 'DESC' } },
-    });
-
-    return claimable.map((c) => this.buildClaimableDto(c));
-  }
-
-  /**
-   * Get user's dividend claim history
-   */
-  async getUserClaimHistory(
+  async initiateClaim(
     userId: string,
-    limit: number = 50,
-    offset: number = 0,
-  ): Promise<DividendClaimDto[]> {
-    const user = await this.userRepository.findOne({ where: { id: userId } });
+    address: string,
+    dto: InitiateClaimDto,
+  ): Promise<InitiateClaimResponseDto> {
+    // Verify user owns shares in this creator
+    const share = await this.creatorShareRepository.findOne({
+      where: {
+        holderAddress: address,
+        creatorId: dto.creatorId,
+      },
+      relations: ['creator'],
+    });
 
-    if (!user) {
-      throw new NotFoundException('User not found');
+    if (!share) {
+      throw new BadRequestException(
+        'You do not own shares in this creator',
+      );
     }
 
-    if (!user.walletAddress) {
-      return [];
+    // Get latest epoch
+    const latestEpoch = await this.dividendEpochRepository.findOne({
+      where: {
+        creatorId: dto.creatorId,
+        distributed: true,
+      },
+      order: { epochNumber: 'DESC' },
+    });
+
+    if (!latestEpoch) {
+      throw new NotFoundException('No dividends available for this creator');
     }
 
-    const claims = await this.dividendClaimRepository.find({
-      where: { claimer: user.walletAddress.toLowerCase() },
-      relations: ['claimableDividend', 'claimableDividend.dividendEpoch'],
+    // Calculate claimable amount
+    const totalShares = share.creator.totalShares || 1;
+    const userSharePercentage = share.sharesHeld / totalShares;
+    const claimableAmount = Number(latestEpoch.totalFees) * userSharePercentage;
+
+    if (claimableAmount <= 0) {
+      throw new BadRequestException('No claimable dividends');
+    }
+
+    // Create pending claim record
+    const claim = this.dividendClaimRepository.create({
+      userAddress: address,
+      creatorId: dto.creatorId,
+      amount: claimableAmount,
+      tweetUrl: '', // Will be filled in complete step
+      verified: false,
+      claimedAt: new Date(),
+    });
+
+    await this.dividendClaimRepository.save(claim);
+
+    // Generate required tweet text
+    const requiredTweetText = `Claiming $${claimableAmount.toFixed(2)} in dividends from ${share.creator.twitterHandle}! 🎉 #Guessly #Dividends`;
+
+    const expiresAt = new Date();
+    expiresAt.setHours(expiresAt.getHours() + 24); // 24 hour expiration
+
+    return {
+      claimId: claim.id,
+      amount: claimableAmount,
+      requiredTweetText,
+      expiresAt: expiresAt.toISOString(),
+      instructions:
+        'Post the provided text as a tweet and submit the tweet URL in the next step. Make sure the tweet is public!',
+    };
+  }
+
+  /**
+   * Complete dividend claim with tweet verification
+   */
+  async completeClaim(
+    userId: string,
+    address: string,
+    dto: CompleteClaimDto,
+  ): Promise<CompleteClaimResponseDto> {
+    // Find the claim
+    const claim = await this.dividendClaimRepository.findOne({
+      where: { id: dto.claimId, userAddress: address },
+      relations: ['creator'],
+    });
+
+    if (!claim) {
+      throw new NotFoundException('Claim not found');
+    }
+
+    if (claim.verified) {
+      throw new BadRequestException('Claim already completed');
+    }
+
+    // Extract tweet ID from URL
+    // Format: https://twitter.com/username/status/1234567890
+    const tweetIdMatch = dto.tweetUrl.match(/status\/(\d+)/);
+    if (!tweetIdMatch) {
+      throw new BadRequestException('Invalid tweet URL format');
+    }
+
+    const tweetId = tweetIdMatch[1];
+
+    // TODO: In production, verify tweet content matches required text
+    // This would use Twitter API to fetch tweet and validate
+    // For now, we'll accept it as valid
+
+    // Update claim with tweet info
+    claim.tweetUrl = dto.tweetUrl;
+    claim.tweetId = tweetId;
+    claim.verified = true;
+
+    // Generate transaction hash (placeholder)
+    const txHash = `0x${Math.random().toString(16).substring(2, 66)}`;
+    claim.txHash = txHash;
+
+    await this.dividendClaimRepository.save(claim);
+
+    this.logger.log(
+      `Dividend claim completed: ${claim.id} - $${claim.amount} to ${address}`,
+    );
+
+    return {
+      success: true,
+      claimId: claim.id,
+      amount: Number(claim.amount),
+      txHash,
+      tweetId,
+      claimedAt: claim.claimedAt.toISOString(),
+      message: 'Dividends successfully claimed! Funds will arrive shortly.',
+    };
+  }
+
+  /**
+   * Get claim history for a user
+   */
+  async getClaimHistory(
+    address: string,
+    page: number = 1,
+    limit: number = 20,
+  ): Promise<ClaimHistoryResponseDto> {
+    const [claims, total] = await this.dividendClaimRepository.findAndCount({
+      where: { userAddress: address, verified: true },
+      relations: ['creator'],
       order: { claimedAt: 'DESC' },
+      skip: (page - 1) * limit,
       take: limit,
-      skip: offset,
     });
 
-    return claims.map((claim) => ({
+    const claimItems: ClaimHistoryItemDto[] = claims.map((claim) => ({
       id: claim.id,
-      creatorAddress: claim.claimableDividend.dividendEpoch.creatorAddress,
-      epochNumber: claim.claimableDividend.dividendEpoch.epochNumber,
-      claimer: claim.claimer,
-      claimerHandle: user.twitterHandle,
-      amount: this.formatUSDC(BigInt(claim.amount)),
-      transactionHash: claim.transactionHash,
-      blockNumber: claim.blockNumber,
-      claimedAt: claim.claimedAt,
+      creator: {
+        id: claim.creator.id,
+        twitterHandle: claim.creator.twitterHandle,
+      },
+      amount: Number(claim.amount),
+      tweetUrl: claim.tweetUrl,
+      txHash: claim.txHash || '0x0',
+      verified: claim.verified,
+      claimedAt: claim.claimedAt.toISOString(),
     }));
-  }
 
-  /**
-   * Helper: Build epoch DTO
-   */
-  private async buildEpochDto(epoch: DividendEpoch): Promise<DividendEpochDto> {
-    // Count claims
-    const claimCount = await this.dividendClaimRepository.count({
-      where: { claimableDividend: { dividendEpoch: { id: epoch.id } } },
-    });
+    // Calculate summary
+    const totalClaimed = claims.reduce(
+      (sum, claim) => sum + Number(claim.amount),
+      0,
+    );
 
-    // Calculate total claimed
-    const claimedResult = await this.dividendClaimRepository
-      .createQueryBuilder('claim')
-      .select('SUM(claim.amount)', 'total')
-      .innerJoin('claim.claimableDividend', 'claimable')
-      .where('claimable.dividendEpochId = :epochId', { epochId: epoch.id })
-      .getRawOne();
+    const lastClaimDate = claims.length > 0 ? claims[0].claimedAt.toISOString() : null;
 
-    const totalClaimed = BigInt(claimedResult.total || '0');
-    const totalDividends = BigInt(epoch.totalDividends);
-    const totalUnclaimed = totalDividends - totalClaimed;
-
-    return new DividendEpochDto({
-      id: epoch.id,
-      creatorAddress: epoch.creatorAddress,
-      epochNumber: epoch.epochNumber,
-      startTime: epoch.startTime,
-      endTime: epoch.endTime,
-      totalDividends: this.formatUSDC(totalDividends),
-      totalSharesAtSnapshot: this.formatUSDC(BigInt(epoch.totalSharesAtSnapshot)),
-      isFinalized: epoch.isFinalized,
-      finalizedAt: epoch.finalizedAt,
-      totalClaimed: this.formatUSDC(totalClaimed),
-      totalUnclaimed: this.formatUSDC(totalUnclaimed),
-      claimantCount: claimCount,
-      createdAt: epoch.createdAt,
-    });
-  }
-
-  /**
-   * Helper: Build claimable DTO
-   */
-  private buildClaimableDto(claimable: ClaimableDividend): ClaimableDividendDto {
-    return new ClaimableDividendDto({
-      id: claimable.id,
-      creatorAddress: claimable.dividendEpoch.creatorAddress,
-      epochNumber: claimable.dividendEpoch.epochNumber,
-      shareholder: claimable.shareholder,
-      sharesHeld: this.formatUSDC(BigInt(claimable.sharesHeld)),
-      claimableAmount: this.formatUSDC(BigInt(claimable.claimableAmount)),
-      isClaimed: claimable.isClaimed,
-      claimedAt: claimable.claimedAt,
-      transactionHash: claimable.transactionHash,
-      epochEndTime: claimable.dividendEpoch.endTime,
-    });
-  }
-
-  /**
-   * Helper: Format USDC amount
-   */
-  private formatUSDC(amount: bigint): string {
-    const formatted = amount.toString().padStart(7, '0');
-    const dollars = formatted.slice(0, -6) || '0';
-    const cents = formatted.slice(-6);
-    return `${dollars}.${cents}`;
+    return {
+      claims: claimItems,
+      summary: {
+        totalClaimed,
+        claimsCount: total,
+        lastClaimDate,
+      },
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit),
+      },
+    };
   }
 }

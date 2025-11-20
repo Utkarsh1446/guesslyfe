@@ -1,26 +1,37 @@
 import {
   Controller,
   Get,
+  Post,
+  Body,
   Param,
   Query,
   UseGuards,
-  ParseIntPipe,
-  DefaultValuePipe,
+  Req,
 } from '@nestjs/common';
 import {
   ApiTags,
   ApiOperation,
   ApiResponse,
-  ApiParam,
+  ApiBearerAuth,
   ApiQuery,
+  ApiParam,
 } from '@nestjs/swagger';
 import { SharesService } from './shares.service';
-import { OptionalAuthGuard } from '../auth/guards/optional-auth.guard';
+import { AuthGuard } from '../auth/guards/auth.guard';
 import {
-  SharePriceQuoteDto,
-  ShareHistoryDto,
-  TrendingShareDto,
-} from './dto/share-response.dto';
+  SharePriceQueryDto,
+  SharePriceResponseDto,
+  BuySharesDto,
+  BuySharesResponseDto,
+  SellSharesDto,
+  SellSharesResponseDto,
+  ShareHoldingsResponseDto,
+  ShareTransactionListResponseDto,
+  ShareChartResponseDto,
+  ShareChartQueryDto,
+  ChartTimeframe,
+  ChartInterval,
+} from './dto';
 
 @ApiTags('Shares')
 @Controller('shares')
@@ -28,83 +39,225 @@ export class SharesController {
   constructor(private readonly sharesService: SharesService) {}
 
   /**
-   * Get buy price quote for creator shares
-   * NOTE: This is informational only. Users execute trades from their wallet in the frontend.
+   * GET /shares/price/:creatorId - Get share price quote
    */
-  @Get(':creatorAddress/price/buy')
-  @UseGuards(OptionalAuthGuard)
+  @Get('price/:creatorId')
   @ApiOperation({
-    summary: 'Get buy price quote for creator shares',
-    description:
-      'Returns the current buy price for the specified amount of shares. ' +
-      'This is READ-ONLY. Actual trading happens on the frontend via user wallet signing.',
+    summary: 'Get buy/sell price for creator shares',
+    description: 'Returns price quote for buying or selling a specific amount of shares',
   })
-  @ApiParam({ name: 'creatorAddress', description: 'Creator wallet address' })
-  @ApiQuery({ name: 'amount', type: Number, description: 'Number of shares to buy (default: 1)' })
-  @ApiResponse({ status: 200, description: 'Buy price quote', type: SharePriceQuoteDto })
+  @ApiParam({
+    name: 'creatorId',
+    description: 'Creator UUID',
+    type: 'string',
+  })
+  @ApiQuery({
+    name: 'action',
+    enum: ['buy', 'sell'],
+    description: 'Trade action',
+    required: true,
+  })
+  @ApiQuery({
+    name: 'amount',
+    type: 'number',
+    description: 'Number of shares',
+    required: true,
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Price quote retrieved successfully',
+    type: SharePriceResponseDto,
+  })
+  @ApiResponse({ status: 400, description: 'Invalid parameters' })
   @ApiResponse({ status: 404, description: 'Creator not found' })
-  @ApiResponse({ status: 400, description: 'Shares not unlocked or invalid amount' })
-  async getBuyPriceQuote(
-    @Param('creatorAddress') creatorAddress: string,
-    @Query('amount', new DefaultValuePipe(1), ParseIntPipe) amount: number,
-  ): Promise<SharePriceQuoteDto> {
-    return this.sharesService.getBuyPriceQuote(creatorAddress, amount);
+  async getSharePrice(
+    @Param('creatorId') creatorId: string,
+    @Query() query: SharePriceQueryDto,
+  ): Promise<SharePriceResponseDto> {
+    return this.sharesService.getSharePrice(creatorId, query);
   }
 
   /**
-   * Get sell price quote for creator shares
-   * NOTE: This is informational only. Users execute trades from their wallet in the frontend.
+   * POST /shares/buy - Prepare buy shares transaction
    */
-  @Get(':creatorAddress/price/sell')
-  @UseGuards(OptionalAuthGuard)
+  @Post('buy')
+  @UseGuards(AuthGuard)
+  @ApiBearerAuth()
   @ApiOperation({
-    summary: 'Get sell price quote for creator shares',
+    summary: 'Generate transaction to buy shares',
     description:
-      'Returns the current sell price for the specified amount of shares. ' +
-      'This is READ-ONLY. Actual trading happens on the frontend via user wallet signing.',
+      'Returns unsigned transaction data for buying creator shares. User must sign and submit transaction.',
   })
-  @ApiParam({ name: 'creatorAddress', description: 'Creator wallet address' })
-  @ApiQuery({ name: 'amount', type: Number, description: 'Number of shares to sell (default: 1)' })
-  @ApiResponse({ status: 200, description: 'Sell price quote', type: SharePriceQuoteDto })
+  @ApiResponse({
+    status: 200,
+    description: 'Unsigned transaction prepared',
+    type: BuySharesResponseDto,
+  })
+  @ApiResponse({ status: 400, description: 'Invalid parameters or price changed' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
   @ApiResponse({ status: 404, description: 'Creator not found' })
-  @ApiResponse({ status: 400, description: 'Shares not unlocked or invalid amount' })
-  async getSellPriceQuote(
-    @Param('creatorAddress') creatorAddress: string,
-    @Query('amount', new DefaultValuePipe(1), ParseIntPipe) amount: number,
-  ): Promise<SharePriceQuoteDto> {
-    return this.sharesService.getSellPriceQuote(creatorAddress, amount);
+  async buyShares(
+    @Req() req: any,
+    @Body() buyDto: BuySharesDto,
+  ): Promise<BuySharesResponseDto> {
+    const { userId } = req.session;
+    return this.sharesService.prepareBuyTransaction(userId, buyDto);
   }
 
   /**
-   * Get trading history for creator shares
+   * POST /shares/sell - Prepare sell shares transaction
    */
-  @Get(':creatorAddress/history')
-  @UseGuards(OptionalAuthGuard)
-  @ApiOperation({ summary: 'Get trading history for creator shares' })
-  @ApiParam({ name: 'creatorAddress', description: 'Creator wallet address' })
-  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Number of trades (default: 50)' })
-  @ApiQuery({ name: 'offset', required: false, type: Number, description: 'Offset for pagination (default: 0)' })
-  @ApiResponse({ status: 200, description: 'Trading history', type: [ShareHistoryDto] })
+  @Post('sell')
+  @UseGuards(AuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Generate transaction to sell shares',
+    description:
+      'Returns unsigned transaction data for selling creator shares. User must sign and submit transaction.',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Unsigned transaction prepared',
+    type: SellSharesResponseDto,
+  })
+  @ApiResponse({ status: 400, description: 'Invalid parameters or price changed' })
+  @ApiResponse({ status: 401, description: 'Unauthorized' })
   @ApiResponse({ status: 404, description: 'Creator not found' })
-  async getShareHistory(
-    @Param('creatorAddress') creatorAddress: string,
-    @Query('limit', new DefaultValuePipe(50), ParseIntPipe) limit: number,
-    @Query('offset', new DefaultValuePipe(0), ParseIntPipe) offset: number,
-  ): Promise<ShareHistoryDto[]> {
-    return this.sharesService.getShareHistory(creatorAddress, limit, offset);
+  async sellShares(
+    @Req() req: any,
+    @Body() sellDto: SellSharesDto,
+  ): Promise<SellSharesResponseDto> {
+    const { userId } = req.session;
+    return this.sharesService.prepareSellTransaction(userId, sellDto);
   }
 
   /**
-   * Get trending shares by 24h volume
+   * GET /shares/portfolio/:address - Get user's share holdings
    */
-  @Get('trending')
-  @UseGuards(OptionalAuthGuard)
-  @ApiOperation({ summary: 'Get trending creator shares by 24h volume' })
-  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Number of trending shares (default: 10)' })
-  @ApiResponse({ status: 200, description: 'Trending shares', type: [TrendingShareDto] })
-  async getTrendingShares(
-    @Query('limit', new DefaultValuePipe(10), ParseIntPipe) limit: number,
-  ): Promise<TrendingShareDto[]> {
-    return this.sharesService.getTrendingShares(limit);
+  @Get('portfolio/:address')
+  @ApiOperation({
+    summary: 'Get all share holdings for an address',
+    description: 'Returns portfolio of all creator shares held by a wallet address',
+  })
+  @ApiParam({
+    name: 'address',
+    description: 'Wallet address',
+    type: 'string',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Portfolio retrieved successfully',
+    type: ShareHoldingsResponseDto,
+  })
+  @ApiResponse({ status: 404, description: 'Address not found' })
+  async getUserPortfolio(
+    @Param('address') address: string,
+  ): Promise<ShareHoldingsResponseDto> {
+    return this.sharesService.getUserPortfolio(address);
+  }
+
+  /**
+   * GET /shares/transactions/:creatorId - Get transaction history
+   */
+  @Get('transactions/:creatorId')
+  @ApiOperation({
+    summary: 'Get transaction history for creator shares',
+    description: 'Returns paginated list of buy/sell transactions',
+  })
+  @ApiParam({
+    name: 'creatorId',
+    description: 'Creator UUID',
+    type: 'string',
+  })
+  @ApiQuery({
+    name: 'type',
+    enum: ['buy', 'sell'],
+    required: false,
+    description: 'Filter by transaction type',
+  })
+  @ApiQuery({
+    name: 'address',
+    type: 'string',
+    required: false,
+    description: 'Filter by user address',
+  })
+  @ApiQuery({
+    name: 'page',
+    type: 'number',
+    required: false,
+    description: 'Page number',
+    example: 1,
+  })
+  @ApiQuery({
+    name: 'limit',
+    type: 'number',
+    required: false,
+    description: 'Items per page',
+    example: 20,
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Transaction history retrieved',
+    type: ShareTransactionListResponseDto,
+  })
+  @ApiResponse({ status: 404, description: 'Creator not found' })
+  async getTransactionHistory(
+    @Param('creatorId') creatorId: string,
+    @Query('type') type?: 'BUY' | 'SELL',
+    @Query('address') address?: string,
+    @Query('page') page?: number,
+    @Query('limit') limit?: number,
+  ): Promise<ShareTransactionListResponseDto> {
+    return this.sharesService.getTransactionHistory(
+      creatorId,
+      page || 1,
+      limit || 20,
+      type,
+      address,
+    );
+  }
+
+  /**
+   * GET /shares/:creatorId/chart - Get price chart data
+   */
+  @Get(':creatorId/chart')
+  @ApiOperation({
+    summary: 'Get historical price data for charts',
+    description: 'Returns time-series data of share price and volume',
+  })
+  @ApiParam({
+    name: 'creatorId',
+    description: 'Creator UUID',
+    type: 'string',
+  })
+  @ApiQuery({
+    name: 'timeframe',
+    enum: ChartTimeframe,
+    required: false,
+    description: 'Time range for chart data',
+    example: '7d',
+  })
+  @ApiQuery({
+    name: 'interval',
+    enum: ChartInterval,
+    required: false,
+    description: 'Data aggregation interval',
+    example: '1h',
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Chart data retrieved',
+    type: ShareChartResponseDto,
+  })
+  @ApiResponse({ status: 404, description: 'Creator not found' })
+  async getChartData(
+    @Param('creatorId') creatorId: string,
+    @Query() query: ShareChartQueryDto,
+  ): Promise<ShareChartResponseDto> {
+    return this.sharesService.getChartData(
+      creatorId,
+      query.timeframe || ChartTimeframe.DAYS_7,
+      query.interval || ChartInterval.HOUR_1,
+    );
   }
 }

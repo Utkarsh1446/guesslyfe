@@ -4,10 +4,9 @@ import { CreatorsController } from './creators.controller';
 import { CreatorsService } from './creators.service';
 import { Creator } from '../../database/entities/creator.entity';
 import { User } from '../../database/entities/user.entity';
+import { Market } from '../../database/entities/market.entity';
+import { CreatorShare } from '../../database/entities/creator-share.entity';
 import { ShareTransaction } from '../../database/entities/share-transaction.entity';
-import { OpinionMarket } from '../../database/entities/opinion-market.entity';
-import { MarketTrade } from '../../database/entities/market-trade.entity';
-import { ContractsModule } from '../../contracts/contracts.module';
 import { AuthModule } from '../auth/auth.module';
 
 @Module({
@@ -15,11 +14,10 @@ import { AuthModule } from '../auth/auth.module';
     TypeOrmModule.forFeature([
       Creator,
       User,
+      Market,
+      CreatorShare,
       ShareTransaction,
-      OpinionMarket,
-      MarketTrade,
     ]),
-    ContractsModule,
     AuthModule,
   ],
   controllers: [CreatorsController],

@@ -1,34 +1,12 @@
-import {
-  Controller,
-  Get,
-  Patch,
-  Param,
-  Body,
-  UseGuards,
-  Query,
-  ParseIntPipe,
-  DefaultValuePipe,
-} from '@nestjs/common';
-import {
-  ApiTags,
-  ApiOperation,
-  ApiResponse,
-  ApiBearerAuth,
-  ApiParam,
-  ApiQuery,
-} from '@nestjs/swagger';
+import { Controller, Get, Patch, Param, Body, Query, UseGuards, Req } from '@nestjs/common';
+import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiQuery } from '@nestjs/swagger';
 import { UsersService } from './users.service';
-import { AuthGuard } from '../auth/guards/auth.guard';
-import { OptionalAuthGuard } from '../auth/guards/optional-auth.guard';
-import { CurrentUser } from '../auth/decorators/current-user.decorator';
-import { Session } from '../auth/interfaces/session.interface';
 import { UpdateUserDto } from './dto/update-user.dto';
-import {
-  UserResponseDto,
-  UserPortfolioDto,
-  UserMarketPositionDto,
-  TransactionHistoryDto,
-} from './dto/user-response.dto';
+import { UserResponseDto } from './dto/user-response.dto';
+import { UserPortfolioResponseDto } from './dto/user-portfolio-response.dto';
+import { UserActivityResponseDto } from './dto/user-activity-response.dto';
+import { UserSearchResponseDto } from './dto/user-search-response.dto';
+import { AuthGuard } from '../auth/guards/auth.guard';
 
 @ApiTags('Users')
 @Controller('users')
@@ -36,185 +14,136 @@ export class UsersController {
   constructor(private readonly usersService: UsersService) {}
 
   /**
-   * Get current user profile (authenticated)
+   * GET /users/me - Get current user profile
    */
   @Get('me')
   @UseGuards(AuthGuard)
   @ApiBearerAuth()
-  @ApiOperation({ summary: 'Get current authenticated user profile' })
-  @ApiResponse({ status: 200, description: 'User profile', type: UserResponseDto })
+  @ApiOperation({ summary: 'Get current user profile' })
+  @ApiResponse({ status: 200, description: 'User profile retrieved', type: UserResponseDto })
   @ApiResponse({ status: 401, description: 'Unauthorized' })
-  async getCurrentUser(@CurrentUser() session: Session): Promise<UserResponseDto> {
-    return this.usersService.getUserById(session.userId);
+  async getCurrentUser(@Req() req: any): Promise<UserResponseDto> {
+    return this.usersService.getUserById(req.session.userId);
   }
 
   /**
-   * Update current user profile
+   * PATCH /users/me - Update current user profile
    */
   @Patch('me')
   @UseGuards(AuthGuard)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Update current user profile' })
-  @ApiResponse({ status: 200, description: 'Updated user profile', type: UserResponseDto })
+  @ApiResponse({ status: 200, description: 'User profile updated', type: UserResponseDto })
   @ApiResponse({ status: 401, description: 'Unauthorized' })
-  @ApiResponse({ status: 400, description: 'Invalid input' })
   async updateCurrentUser(
-    @CurrentUser() session: Session,
+    @Req() req: any,
     @Body() updateDto: UpdateUserDto,
   ): Promise<UserResponseDto> {
-    return this.usersService.updateUser(session.userId, updateDto);
+    return this.usersService.updateUser(req.session.userId, updateDto);
   }
 
   /**
-   * Get user by ID
+   * GET /users/id/:id - Get user by ID
    */
   @Get('id/:id')
-  @UseGuards(OptionalAuthGuard)
   @ApiOperation({ summary: 'Get user by ID' })
-  @ApiParam({ name: 'id', description: 'User ID' })
-  @ApiResponse({ status: 200, description: 'User profile', type: UserResponseDto })
+  @ApiResponse({ status: 200, description: 'User found', type: UserResponseDto })
   @ApiResponse({ status: 404, description: 'User not found' })
-  async getUserById(@Param('id') userId: string): Promise<UserResponseDto> {
-    return this.usersService.getUserById(userId);
+  async getUserById(@Param('id') id: string): Promise<UserResponseDto> {
+    return this.usersService.getUserById(id);
   }
 
   /**
-   * Get user by Twitter handle
+   * GET /users/handle/:handle - Get user by Twitter handle
    */
   @Get('handle/:handle')
-  @UseGuards(OptionalAuthGuard)
   @ApiOperation({ summary: 'Get user by Twitter handle' })
-  @ApiParam({ name: 'handle', description: 'Twitter handle (without @)' })
-  @ApiResponse({ status: 200, description: 'User profile', type: UserResponseDto })
+  @ApiResponse({ status: 200, description: 'User found', type: UserResponseDto })
   @ApiResponse({ status: 404, description: 'User not found' })
   async getUserByHandle(@Param('handle') handle: string): Promise<UserResponseDto> {
     return this.usersService.getUserByHandle(handle);
   }
 
   /**
-   * Get user by wallet address
+   * GET /users/wallet/:address - Get user by wallet address
    */
   @Get('wallet/:address')
-  @UseGuards(OptionalAuthGuard)
   @ApiOperation({ summary: 'Get user by wallet address' })
-  @ApiParam({ name: 'address', description: 'Ethereum wallet address' })
-  @ApiResponse({ status: 200, description: 'User profile', type: UserResponseDto })
+  @ApiResponse({ status: 200, description: 'User found', type: UserResponseDto })
   @ApiResponse({ status: 404, description: 'User not found' })
-  async getUserByWallet(@Param('address') walletAddress: string): Promise<UserResponseDto> {
-    return this.usersService.getUserByWallet(walletAddress);
+  async getUserByWallet(@Param('address') address: string): Promise<UserResponseDto> {
+    return this.usersService.getUserByWallet(address);
   }
 
   /**
-   * Get current user's share portfolio
+   * GET /users/:address/portfolio - Get user portfolio
    */
-  @Get('me/portfolio')
-  @UseGuards(AuthGuard)
-  @ApiBearerAuth()
-  @ApiOperation({ summary: 'Get current user share portfolio' })
+  @Get(':address/portfolio')
+  @ApiOperation({
+    summary: "Get user's portfolio (shares + market positions)",
+    description: 'Returns aggregated portfolio with shares and market positions',
+  })
+  @ApiQuery({ name: 'page', required: false, type: Number, example: 1 })
+  @ApiQuery({ name: 'limit', required: false, type: Number, example: 20 })
   @ApiResponse({
     status: 200,
-    description: 'User portfolio',
-    type: [UserPortfolioDto],
+    description: 'Portfolio retrieved',
+    type: UserPortfolioResponseDto,
   })
-  @ApiResponse({ status: 401, description: 'Unauthorized' })
-  async getCurrentUserPortfolio(@CurrentUser() session: Session): Promise<UserPortfolioDto[]> {
-    return this.usersService.getUserPortfolio(session.userId);
+  async getUserPortfolio(
+    @Param('address') address: string,
+    @Query('page') page?: number,
+    @Query('limit') limit?: number,
+  ): Promise<UserPortfolioResponseDto> {
+    return this.usersService.getUserPortfolio(address, page || 1, limit || 20);
   }
 
   /**
-   * Get user's share portfolio by ID
+   * GET /users/:address/activity - Get user activity feed
    */
-  @Get(':id/portfolio')
-  @UseGuards(OptionalAuthGuard)
-  @ApiOperation({ summary: 'Get user share portfolio by ID' })
-  @ApiParam({ name: 'id', description: 'User ID' })
+  @Get(':address/activity')
+  @ApiOperation({
+    summary: 'Get user activity feed',
+    description: 'Returns paginated list of user activities (trades, shares, etc.)',
+  })
+  @ApiQuery({ name: 'page', required: false, type: Number, example: 1 })
+  @ApiQuery({ name: 'limit', required: false, type: Number, example: 20 })
+  @ApiQuery({ name: 'type', required: false, type: String, description: 'Filter by activity type' })
   @ApiResponse({
     status: 200,
-    description: 'User portfolio',
-    type: [UserPortfolioDto],
+    description: 'Activity feed retrieved',
+    type: UserActivityResponseDto,
   })
-  @ApiResponse({ status: 404, description: 'User not found' })
-  async getUserPortfolio(@Param('id') userId: string): Promise<UserPortfolioDto[]> {
-    return this.usersService.getUserPortfolio(userId);
+  async getUserActivity(
+    @Param('address') address: string,
+    @Query('page') page?: number,
+    @Query('limit') limit?: number,
+    @Query('type') type?: string,
+  ): Promise<UserActivityResponseDto> {
+    return this.usersService.getUserActivity(address, page || 1, limit || 20, type as any);
   }
 
   /**
-   * Get current user's market positions
+   * GET /users/search - Search users
    */
-  @Get('me/markets')
-  @UseGuards(AuthGuard)
-  @ApiBearerAuth()
-  @ApiOperation({ summary: 'Get current user market positions' })
+  @Get('search')
+  @ApiOperation({
+    summary: 'Search users by handle or name',
+    description: 'Returns paginated search results',
+  })
+  @ApiQuery({ name: 'q', required: true, type: String, description: 'Search query' })
+  @ApiQuery({ name: 'page', required: false, type: Number, example: 1 })
+  @ApiQuery({ name: 'limit', required: false, type: Number, example: 20 })
   @ApiResponse({
     status: 200,
-    description: 'User market positions',
-    type: [UserMarketPositionDto],
+    description: 'Search results retrieved',
+    type: UserSearchResponseDto,
   })
-  @ApiResponse({ status: 401, description: 'Unauthorized' })
-  async getCurrentUserMarkets(@CurrentUser() session: Session): Promise<UserMarketPositionDto[]> {
-    return this.usersService.getUserMarketPositions(session.userId);
-  }
-
-  /**
-   * Get user's market positions by ID
-   */
-  @Get(':id/markets')
-  @UseGuards(OptionalAuthGuard)
-  @ApiOperation({ summary: 'Get user market positions by ID' })
-  @ApiParam({ name: 'id', description: 'User ID' })
-  @ApiResponse({
-    status: 200,
-    description: 'User market positions',
-    type: [UserMarketPositionDto],
-  })
-  @ApiResponse({ status: 404, description: 'User not found' })
-  async getUserMarkets(@Param('id') userId: string): Promise<UserMarketPositionDto[]> {
-    return this.usersService.getUserMarketPositions(userId);
-  }
-
-  /**
-   * Get current user's transaction history
-   */
-  @Get('me/transactions')
-  @UseGuards(AuthGuard)
-  @ApiBearerAuth()
-  @ApiOperation({ summary: 'Get current user transaction history' })
-  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Number of transactions (default: 50)' })
-  @ApiQuery({ name: 'offset', required: false, type: Number, description: 'Offset for pagination (default: 0)' })
-  @ApiResponse({
-    status: 200,
-    description: 'Transaction history',
-    type: [TransactionHistoryDto],
-  })
-  @ApiResponse({ status: 401, description: 'Unauthorized' })
-  async getCurrentUserTransactions(
-    @CurrentUser() session: Session,
-    @Query('limit', new DefaultValuePipe(50), ParseIntPipe) limit: number,
-    @Query('offset', new DefaultValuePipe(0), ParseIntPipe) offset: number,
-  ): Promise<TransactionHistoryDto[]> {
-    return this.usersService.getTransactionHistory(session.userId, limit, offset);
-  }
-
-  /**
-   * Get user's transaction history by ID
-   */
-  @Get(':id/transactions')
-  @UseGuards(OptionalAuthGuard)
-  @ApiOperation({ summary: 'Get user transaction history by ID' })
-  @ApiParam({ name: 'id', description: 'User ID' })
-  @ApiQuery({ name: 'limit', required: false, type: Number, description: 'Number of transactions (default: 50)' })
-  @ApiQuery({ name: 'offset', required: false, type: Number, description: 'Offset for pagination (default: 0)' })
-  @ApiResponse({
-    status: 200,
-    description: 'Transaction history',
-    type: [TransactionHistoryDto],
-  })
-  @ApiResponse({ status: 404, description: 'User not found' })
-  async getUserTransactions(
-    @Param('id') userId: string,
-    @Query('limit', new DefaultValuePipe(50), ParseIntPipe) limit: number,
-    @Query('offset', new DefaultValuePipe(0), ParseIntPipe) offset: number,
-  ): Promise<TransactionHistoryDto[]> {
-    return this.usersService.getTransactionHistory(userId, limit, offset);
+  async searchUsers(
+    @Query('q') query: string,
+    @Query('page') page?: number,
+    @Query('limit') limit?: number,
+  ): Promise<UserSearchResponseDto> {
+    return this.usersService.searchUsers(query, page || 1, limit || 20);
   }
 }

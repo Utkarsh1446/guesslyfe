@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Authentication Error - Guessly</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 100vh;
+            padding: 20px;
+        }
+        .container {
+            background: white;
+            padding: 40px;
+            border-radius: 20px;
+            box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+            text-align: center;
+            max-width: 500px;
+            width: 100%;
+        }
+        .error-icon {
+            font-size: 64px;
+            margin-bottom: 20px;
+        }
+        h1 {
+            color: #e53e3e;
+            font-size: 28px;
+            margin-bottom: 16px;
+        }
+        p {
+            color: #4a5568;
+            font-size: 16px;
+            line-height: 1.6;
+            margin-bottom: 24px;
+        }
+        .error-details {
+            background: #fff5f5;
+            padding: 16px;
+            border-radius: 8px;
+            border-left: 4px solid #e53e3e;
+            text-align: left;
+            margin-bottom: 24px;
+        }
+        .error-details strong {
+            color: #c53030;
+        }
+        .error-message {
+            font-family: monospace;
+            font-size: 14px;
+            color: #742a2a;
+            margin-top: 8px;
+            word-break: break-word;
+        }
+        .btn {
+            background: #e53e3e;
+            color: white;
+            padding: 12px 32px;
+            border-radius: 8px;
+            text-decoration: none;
+            display: inline-block;
+            font-weight: 600;
+            transition: background 0.2s;
+            margin: 8px;
+        }
+        .btn:hover {
+            background: #c53030;
+        }
+        .btn-secondary {
+            background: #4299e1;
+        }
+        .btn-secondary:hover {
+            background: #3182ce;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="error-icon">❌</div>
+        <h1>Authentication Failed</h1>
+        <p>We encountered an error while trying to authenticate your Twitter account.</p>
+
+        <div class="error-details" id="errorDetails" style="display: none;">
+            <strong>Error Details:</strong>
+            <div class="error-message" id="errorMessage"></div>
+        </div>
+
+        <a href="https://guessly-backend-738787111842.us-central1.run.app/api/v1/auth/twitter/login" class="btn">Try Again</a>
+        <a href="javascript:window.close()" class="btn btn-secondary">Close Window</a>
+    </div>
+
+    <script>
+        // Parse error message from URL
+        const urlParams = new URLSearchParams(window.location.search);
+        const errorMessage = urlParams.get('message');
+
+        if (errorMessage) {
+            document.getElementById('errorDetails').style.display = 'block';
+            document.getElementById('errorMessage').textContent = decodeURIComponent(errorMessage);
+        }
+    </script>
+</body>
+</html>
