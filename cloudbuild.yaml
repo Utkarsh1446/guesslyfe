@@ -20,39 +20,26 @@ steps:
       - 'push'
       - 'us-central1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/guesslyfe/guessly-backend:latest'
 
-  # Convert .env file to YAML format for Cloud Run
-  - name: 'gcr.io/cloud-builders/cloud-builders-docker'
+  # Deploy container image to Cloud Run with environment variables
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
     entrypoint: bash
     args:
       - '-c'
       - |
+        # Convert .env.production to YAML format
         cat backend/.env.production | grep -v '^#' | grep -v '^$' | sed 's/=/: /' > /workspace/env-vars.yaml
-        cat /workspace/env-vars.yaml
 
-  # Deploy container image to Cloud Run
-  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
-    entrypoint: gcloud
-    args:
-      - 'run'
-      - 'deploy'
-      - 'guessly-backend'
-      - '--image'
-      - 'us-central1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/guesslyfe/guessly-backend:$COMMIT_SHA'
-      - '--region'
-      - 'us-central1'
-      - '--platform'
-      - 'managed'
-      - '--allow-unauthenticated'
-      - '--port'
-      - '8080'
-      - '--timeout'
-      - '600'
-      - '--max-instances'
-      - '10'
-      - '--memory'
-      - '2Gi'
-      - '--env-vars-file'
-      - '/workspace/env-vars.yaml'
+        # Deploy to Cloud Run with environment file
+        gcloud run deploy guessly-backend \
+          --image us-central1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/guesslyfe/guessly-backend:$COMMIT_SHA \
+          --region us-central1 \
+          --platform managed \
+          --allow-unauthenticated \
+          --port 8080 \
+          --timeout 600 \
+          --max-instances 10 \
+          --memory 2Gi \
+          --env-vars-file /workspace/env-vars.yaml
 
 images:
   - 'us-central1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/guesslyfe/guessly-backend:$COMMIT_SHA'
