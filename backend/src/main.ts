@@ -33,13 +33,22 @@ async function bootstrap() {
 
   // CORS Configuration
   const corsOriginStr = configService.get<string>('app.corsOrigin') || '';
-  const corsOrigins = corsOriginStr
+  const corsOriginsList = corsOriginStr
     .split(',')
     .map((origin) => origin.trim())
     .filter((origin) => origin.length > 0);
 
+  // Dynamic CORS origin checker
+  const corsOriginChecker = (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+    if (!origin || corsOriginsList.includes(origin)) {
+      callback(null, origin || 'http://localhost:3000');
+    } else {
+      callback(null, false);
+    }
+  };
+
   app.enableCors({
-    origin: corsOrigins.length > 0 ? corsOrigins : 'http://localhost:3001',
+    origin: corsOriginChecker,
     credentials: configService.get<boolean>('app.corsCredentials'),
     methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
