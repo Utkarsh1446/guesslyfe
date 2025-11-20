@@ -35,8 +35,6 @@ steps:
       - '--platform'
       - 'managed'
       - '--allow-unauthenticated'
-      - '--set-env-vars'
-      - 'NODE_ENV=production'
 
 images:
   - 'gcr.io/$PROJECT_ID/guessly-backend:$COMMIT_SHA'
