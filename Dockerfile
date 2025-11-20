@@ -15,9 +15,6 @@ COPY backend/tsconfig.build.json ./
 COPY backend/nest-cli.json ./
 COPY backend/.prettierrc ./
 
-# Copy environment file for production
-COPY backend/.env.production .env
-
 # Build
 RUN npm run build
 
@@ -30,5 +27,15 @@ ENV NODE_ENV=production
 # Listen on PORT env var (Cloud Run sets this)
 ENV PORT=8080
 
+# Default database settings (will be overridden by Cloud Run environment variables)
+ENV DB_HOST=127.0.0.1
+ENV DB_PORT=5432
+ENV DB_USERNAME=postgres
+ENV DB_PASSWORD=postgres
+ENV DB_DATABASE=guessly
+
+# Create startup script that logs environment and starts app
+RUN echo '#!/bin/sh\necho "Starting Guessly Backend..."\necho "NODE_ENV=$NODE_ENV"\necho "PORT=$PORT"\necho "DB_HOST=$DB_HOST"\necho "API_PREFIX=${API_PREFIX:-api/v1}"\nnode dist/main' > /app/start.sh && chmod +x /app/start.sh
+
 # Start
-CMD ["node", "dist/main"]
+CMD ["/app/start.sh"]

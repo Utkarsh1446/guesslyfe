@@ -37,7 +37,13 @@ steps:
       - '--port'
       - '8080'
       - '--timeout'
-      - '300'
+      - '600'
+      - '--max-instances'
+      - '10'
+      - '--memory'
+      - '2Gi'
+      - '--env-vars-file'
+      - 'backend/.env.production'
 
 images:
   - 'gcr.io/$PROJECT_ID/guessly-backend:$COMMIT_SHA'
