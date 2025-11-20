@@ -4,21 +4,30 @@ steps:
     args:
       - 'build'
       - '-t'
-      - 'gcr.io/$PROJECT_ID/guessly-backend:$COMMIT_SHA'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/guesslyfe/guessly-backend:$COMMIT_SHA'
       - '-t'
-      - 'gcr.io/$PROJECT_ID/guessly-backend:latest'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/guesslyfe/guessly-backend:latest'
       - '.'
 
-  # Push the container image to Container Registry
+  # Push the container image to Artifact Registry
   - name: 'gcr.io/cloud-builders/docker'
     args:
       - 'push'
-      - 'gcr.io/$PROJECT_ID/guessly-backend:$COMMIT_SHA'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/guesslyfe/guessly-backend:$COMMIT_SHA'
 
   - name: 'gcr.io/cloud-builders/docker'
     args:
       - 'push'
-      - 'gcr.io/$PROJECT_ID/guessly-backend:latest'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/guesslyfe/guessly-backend:latest'
+
+  # Convert .env file to YAML format for Cloud Run
+  - name: 'gcr.io/cloud-builders/cloud-builders-docker'
+    entrypoint: bash
+    args:
+      - '-c'
+      - |
+        cat backend/.env.production | grep -v '^#' | grep -v '^$' | sed 's/=/: /' > /workspace/env-vars.yaml
+        cat /workspace/env-vars.yaml
 
   # Deploy container image to Cloud Run
   - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
@@ -28,7 +37,7 @@ steps:
       - 'deploy'
       - 'guessly-backend'
       - '--image'
-      - 'gcr.io/$PROJECT_ID/guessly-backend:$COMMIT_SHA'
+      - 'us-central1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/guesslyfe/guessly-backend:$COMMIT_SHA'
       - '--region'
       - 'us-central1'
       - '--platform'
@@ -43,11 +52,11 @@ steps:
       - '--memory'
       - '2Gi'
       - '--env-vars-file'
-      - 'backend/.env.production'
+      - '/workspace/env-vars.yaml'
 
 images:
-  - 'gcr.io/$PROJECT_ID/guessly-backend:$COMMIT_SHA'
-  - 'gcr.io/$PROJECT_ID/guessly-backend:latest'
+  - 'us-central1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/guesslyfe/guessly-backend:$COMMIT_SHA'
+  - 'us-central1-docker.pkg.dev/$PROJECT_ID/cloud-run-source-deploy/guesslyfe/guessly-backend:latest'
 
 options:
   logging: CLOUD_LOGGING_ONLY
