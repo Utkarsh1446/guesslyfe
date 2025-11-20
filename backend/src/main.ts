@@ -8,7 +8,7 @@ import { ConfigService } from '@nestjs/config';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import helmet from 'helmet';
 import compression from 'compression';
-import * as cookieParser from 'cookie-parser';
+import cookieParser from 'cookie-parser';
 import { AppModule } from './app.module';
 import { AllExceptionsFilter } from './common/filters/http-exception.filter';
 import { LoggingInterceptor } from './common/interceptors/logging.interceptor';
@@ -41,7 +41,7 @@ async function bootstrap() {
   // Dynamic CORS origin checker
   const corsOriginChecker = (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
     if (!origin || corsOriginsList.includes(origin)) {
-      callback(null, origin || 'http://localhost:3000');
+      callback(null, true);
     } else {
       callback(null, false);
     }

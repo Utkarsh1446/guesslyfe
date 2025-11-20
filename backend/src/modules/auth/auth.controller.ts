@@ -32,8 +32,8 @@ export class AuthController {
     private readonly configService: ConfigService,
   ) {
     this.frontendUrl = this.configService.get<string>('app.frontendUrl') || 'http://localhost:3000';
-    this.callbackUrl = this.configService.get<string>('twitter.callbackUrl');
-    this.twitterClientId = this.configService.get<string>('twitter.clientId');
+    this.callbackUrl = this.configService.get<string>('twitter.callbackUrl') || '';
+    this.twitterClientId = this.configService.get<string>('twitter.clientId') || '';
   }
 
   /**
